@@ -13,6 +13,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  PGRX_VERSION: 0.14.3
+  PG_VERSION: 16
 
 jobs:
   rust-formatting:
@@ -64,7 +66,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ~/.cargo/bin/cargo-pgrx
-          key: ${{ runner.os }}-cargo-pgrx-0.14.3
+          key: ${{ runner.os }}-cargo-pgrx-${{ env.PGRX_VERSION }}
           restore-keys: |
             ${{ runner.os }}-cargo-pgrx-
 
@@ -72,10 +74,10 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ~/.pgrx
-          key: ${{ runner.os }}-pgrx-pg16-0.14.3-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-pgrx-pg${{ env.PG_VERSION }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-pgrx-pg16-0.14.3-
-            ${{ runner.os }}-pgrx-pg16-
+            ${{ runner.os }}-pgrx-pg${{ env.PG_VERSION }}-${{ env.PGRX_VERSION }}-
+            ${{ runner.os }}-pgrx-pg${{ env.PG_VERSION }}-
 
       - name: Install system dependencies
         run: |
@@ -85,12 +87,12 @@ jobs:
       - name: Install and initialize pgrx
         run: |
           if [ ! -f ~/.cargo/bin/cargo-pgrx ]; then
-            cargo install cargo-pgrx --version=0.14.3 --locked
-            cargo pgrx init --pg16=download
+            cargo install cargo-pgrx --version=${PGRX_VERSION} --locked
           fi
+          cargo pgrx info pg-config ${PG_VERSION} >/dev/null 2>&1 || cargo pgrx init --pg${PG_VERSION}=download
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --features pg16 -- -D warnings
+        run: cargo clippy --all-targets --no-default-features --features pg16 -- -D warnings
 
   rust-tests:
     name: Rust Tests
@@ -122,7 +124,7 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ~/.cargo/bin/cargo-pgrx
-          key: ${{ runner.os }}-cargo-pgrx-0.14.3
+          key: ${{ runner.os }}-cargo-pgrx-${{ env.PGRX_VERSION }}
           restore-keys: |
             ${{ runner.os }}-cargo-pgrx-
 
@@ -130,10 +132,10 @@ jobs:
         uses: actions/cache@v3
         with:
           path: ~/.pgrx
-          key: ${{ runner.os }}-pgrx-pg16-0.14.3-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-pgrx-pg${{ env.PG_VERSION }}-${{ env.PGRX_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-pgrx-pg16-0.14.3-
-            ${{ runner.os }}-pgrx-pg16-
+            ${{ runner.os }}-pgrx-pg${{ env.PG_VERSION }}-${{ env.PGRX_VERSION }}-
+            ${{ runner.os }}-pgrx-pg${{ env.PG_VERSION }}-
 
       - name: Install system dependencies
         run: |
@@ -143,9 +145,9 @@ jobs:
       - name: Install and initialize pgrx
         run: |
           if [ ! -f ~/.cargo/bin/cargo-pgrx ]; then
-            cargo install cargo-pgrx --version=0.14.3 --locked
-            cargo pgrx init --pg16=download
+            cargo install cargo-pgrx --version=${PGRX_VERSION} --locked
           fi
+          cargo pgrx info pg-config ${PG_VERSION} >/dev/null 2>&1 || cargo pgrx init --pg${PG_VERSION}=download
 
       - name: Run Rust tests
-        run: cargo test --features pg16
+        run: cargo test --no-default-features --features pg16
