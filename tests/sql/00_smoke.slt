@@ -1,0 +1,21 @@
+# Basic smoke test for lance FDW.
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_fdw', '${LANCE_URI}', NULL);
+
+query I
+SELECT count(*) FROM t_fdw;
+----
+3
+
+query T
+SELECT name FROM t_fdw WHERE id = 2;
+----
+Bob
+
+query I
+SELECT array_length(embedding, 1) FROM t_fdw ORDER BY id;
+----
+3
+3
+3
