@@ -4,6 +4,7 @@ use futures::StreamExt;
 use lance_rs::dataset::scanner::DatasetRecordBatchStream;
 use lance_rs::Dataset;
 use pgrx::pg_sys;
+use std::ffi::CString;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -311,9 +312,65 @@ pub unsafe extern "C-unwind" fn explain_foreign_scan(
 
     let opts = LanceFdwOptions::from_foreign_table(relid).ok();
     if let Some(opts) = opts {
-        let label = std::ffi::CString::new("Lance URI").unwrap();
-        let value = std::ffi::CString::new(opts.uri).unwrap();
-        pg_sys::ExplainPropertyText(label.as_ptr(), value.as_ptr(), es);
+        let uri_c = CString::new(opts.uri).unwrap_or_else(|_| {
+            pgrx::error!("invalid foreign table option: uri contains NUL byte");
+        });
+        pg_sys::ExplainPropertyText(cstring_label("Lance URI").as_ptr(), uri_c.as_ptr(), es);
+
+        pg_sys::ExplainPropertyInteger(
+            cstring_label("Batch Size").as_ptr(),
+            std::ptr::null(),
+            opts.batch_size as i64,
+            es,
+        );
+
+        let projection = format_projection_list(relation);
+        let projection_c = CString::new(projection).unwrap_or_else(|_| {
+            pgrx::error!("invalid projection list: contains NUL byte");
+        });
+        pg_sys::ExplainPropertyText(
+            cstring_label("Projection").as_ptr(),
+            projection_c.as_ptr(),
+            es,
+        );
+    }
+}
+
+fn cstring_label(s: &'static str) -> CString {
+    CString::new(s).expect("static label must not contain NUL")
+}
+
+fn format_projection_list(relation: *mut pg_sys::RelationData) -> String {
+    unsafe {
+        if relation.is_null() {
+            return "[]".to_string();
+        }
+
+        let tupdesc = (*relation).rd_att;
+        if tupdesc.is_null() {
+            return "[]".to_string();
+        }
+
+        let natts = (*tupdesc).natts.max(0) as usize;
+        let mut cols = Vec::with_capacity(natts);
+
+        for i in 0..natts {
+            let attr = *(*tupdesc).attrs.as_ptr().add(i);
+            if attr.attisdropped {
+                continue;
+            }
+
+            let name = std::ffi::CStr::from_ptr(attr.attname.data.as_ptr())
+                .to_string_lossy()
+                .to_string();
+            cols.push(name);
+        }
+
+        if cols.is_empty() {
+            "[]".to_string()
+        } else {
+            cols.join(", ")
+        }
     }
 }
 
