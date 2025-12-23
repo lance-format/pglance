@@ -298,10 +298,15 @@ mod tests {
         Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
 
         let gen = LanceTestDataGenerator::new().expect("generator");
-        let path = gen
+        let struct_list_path = gen
             .create_table_with_struct_and_list()
             .expect("create table");
-        let uri = path.to_str().expect("uri").replace('\'', "''");
+        let struct_list_uri = struct_list_path.to_str().expect("uri").replace('\'', "''");
+
+        let misc_path = gen
+            .create_table_with_decimal_and_dictionary()
+            .expect("create table");
+        let misc_uri = misc_path.to_str().expect("uri").replace('\'', "''");
 
         let scripts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sql");
         let slt_files = list_slt_files(&scripts_dir);
@@ -320,7 +325,9 @@ mod tests {
             let server = format!("{}_srv", schema);
 
             let mut script = fs::read_to_string(file).expect("read .slt file");
-            script = script.replace("${LANCE_URI}", &uri);
+            script = script.replace("${LANCE_URI}", &struct_list_uri);
+            script = script.replace("${LANCE_URI_STRUCT_LIST}", &struct_list_uri);
+            script = script.replace("${LANCE_URI_MISC}", &misc_uri);
             script = script.replace("${SCHEMA}", &schema);
             script = script.replace("${SERVER}", &server);
 
@@ -343,88 +350,6 @@ CREATE SERVER {server} FOREIGN DATA WRAPPER lance_fdw;\n\n"
                 panic!("{}", e.display(false));
             }
         }
-
-        Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
-    }
-
-    #[pg_test]
-    fn test_fdw_mapping_matches_conversion() {
-        Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
-
-        let gen = LanceTestDataGenerator::new().expect("generator");
-        let path = gen
-            .create_table_with_decimal_and_dictionary()
-            .expect("create table");
-        let uri = path.to_str().unwrap();
-
-        Spi::run("DROP SCHEMA IF EXISTS slt_unit_map CASCADE").expect("drop schema");
-        Spi::run("CREATE SCHEMA slt_unit_map").expect("create schema");
-        Spi::run("SET search_path TO slt_unit_map, public").expect("set search_path");
-        Spi::run("DROP SERVER IF EXISTS lance_srv_unit_map CASCADE").expect("drop server");
-        Spi::run("CREATE SERVER lance_srv_unit_map FOREIGN DATA WRAPPER lance_fdw")
-            .expect("create server");
-
-        let import_sql = format!(
-            "SELECT lance_import('lance_srv_unit_map', 'slt_unit_map', 't_misc', '{}', NULL)",
-            uri.replace('\'', "''")
-        );
-        Spi::run(&import_sql).expect("lance_import");
-
-        let u16_ty = Spi::get_one::<String>(
-            "SELECT atttypid::regtype::text FROM pg_attribute \
-             WHERE attrelid = 'slt_unit_map.t_misc'::regclass AND attname = 'u16'",
-        )
-        .expect("u16 type")
-        .expect("u16 type value");
-        assert_eq!(u16_ty, "integer");
-
-        let u32_ty = Spi::get_one::<String>(
-            "SELECT atttypid::regtype::text FROM pg_attribute \
-             WHERE attrelid = 'slt_unit_map.t_misc'::regclass AND attname = 'u32'",
-        )
-        .expect("u32 type")
-        .expect("u32 type value");
-        assert_eq!(u32_ty, "bigint");
-
-        let dec_ty = Spi::get_one::<String>(
-            "SELECT atttypid::regtype::text FROM pg_attribute \
-             WHERE attrelid = 'slt_unit_map.t_misc'::regclass AND attname = 'dec'",
-        )
-        .expect("dec type")
-        .expect("dec type value");
-        assert_eq!(dec_ty, "numeric");
-
-        let dict_ty = Spi::get_one::<String>(
-            "SELECT atttypid::regtype::text FROM pg_attribute \
-             WHERE attrelid = 'slt_unit_map.t_misc'::regclass AND attname = 'dict'",
-        )
-        .expect("dict type")
-        .expect("dict type value");
-        assert_eq!(dict_ty, "text");
-
-        let u32_max = Spi::get_one::<i64>("SELECT u32 FROM slt_unit_map.t_misc WHERE u16 = 65535")
-            .expect("u32")
-            .expect("u32 value");
-        assert_eq!(u32_max, u32::MAX as i64);
-
-        let dec_ok = Spi::get_one::<bool>(
-            "SELECT dec = 123.45::numeric FROM slt_unit_map.t_misc WHERE u16 = 1",
-        )
-        .expect("dec compare")
-        .expect("dec compare value");
-        assert!(dec_ok);
-
-        let dict = Spi::get_one::<String>("SELECT dict FROM slt_unit_map.t_misc WHERE u16 = 1")
-            .expect("dict")
-            .expect("dict value");
-        assert_eq!(dict, "foo");
-
-        let nulls_ok = Spi::get_one::<bool>(
-            "SELECT dec IS NULL AND dict IS NULL FROM slt_unit_map.t_misc WHERE u16 = 2",
-        )
-        .expect("null check")
-        .expect("null check value");
-        assert!(nulls_ok);
 
         Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
     }
