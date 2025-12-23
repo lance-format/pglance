@@ -4,9 +4,10 @@ use pgrx::prelude::*;
 mod tests {
     use super::*;
     use arrow::array::{
-        Array, BooleanArray, Float32Array, Int32Array, ListBuilder, StringArray, StructArray,
+        builder::StringDictionaryBuilder, Array, BooleanArray, Decimal128Array, Float32Array,
+        Int32Array, ListBuilder, StringArray, StructArray, UInt16Array, UInt32Array,
     };
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::{DataType, Field, Int32Type, Schema};
     use arrow::record_batch::RecordBatch;
     use lance_rs::Dataset;
     use sqllogictest::{DBOutput, DefaultColumnType, Runner};
@@ -143,6 +144,49 @@ mod tests {
             Ok(Self {
                 temp_dir: TempDir::new()?,
             })
+        }
+
+        fn create_table_with_decimal_and_dictionary(
+            &self,
+        ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+            let table_path = self.temp_dir.path().join("fdw_misc");
+
+            let u16_array = UInt16Array::from(vec![1, u16::MAX, 2]);
+            let u32_array = UInt32Array::from(vec![1, u32::MAX, 42]);
+
+            let dec_array = Decimal128Array::from(vec![Some(12345i128), Some(-10i128), None])
+                .with_precision_and_scale(10, 2)?;
+
+            let mut dict_builder = StringDictionaryBuilder::<Int32Type>::new();
+            dict_builder.append("foo")?;
+            dict_builder.append("bar")?;
+            dict_builder.append_null();
+            let dict_array = dict_builder.finish();
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("u16", DataType::UInt16, false),
+                Field::new("u32", DataType::UInt32, false),
+                Field::new("dec", dec_array.data_type().clone(), true),
+                Field::new("dict", dict_array.data_type().clone(), true),
+            ]));
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(u16_array),
+                    Arc::new(u32_array),
+                    Arc::new(dec_array),
+                    Arc::new(dict_array),
+                ],
+            )?;
+
+            let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                Dataset::write(reader, table_path.to_str().unwrap(), None).await
+            })?;
+
+            Ok(table_path)
         }
 
         fn create_table_with_struct_and_list(
@@ -299,6 +343,88 @@ CREATE SERVER {server} FOREIGN DATA WRAPPER lance_fdw;\n\n"
                 panic!("{}", e.display(false));
             }
         }
+
+        Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
+    }
+
+    #[pg_test]
+    fn test_fdw_mapping_matches_conversion() {
+        Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
+
+        let gen = LanceTestDataGenerator::new().expect("generator");
+        let path = gen
+            .create_table_with_decimal_and_dictionary()
+            .expect("create table");
+        let uri = path.to_str().unwrap();
+
+        Spi::run("DROP SCHEMA IF EXISTS slt_unit_map CASCADE").expect("drop schema");
+        Spi::run("CREATE SCHEMA slt_unit_map").expect("create schema");
+        Spi::run("SET search_path TO slt_unit_map, public").expect("set search_path");
+        Spi::run("DROP SERVER IF EXISTS lance_srv_unit_map CASCADE").expect("drop server");
+        Spi::run("CREATE SERVER lance_srv_unit_map FOREIGN DATA WRAPPER lance_fdw")
+            .expect("create server");
+
+        let import_sql = format!(
+            "SELECT lance_import('lance_srv_unit_map', 'slt_unit_map', 't_misc', '{}', NULL)",
+            uri.replace('\'', "''")
+        );
+        Spi::run(&import_sql).expect("lance_import");
+
+        let u16_ty = Spi::get_one::<String>(
+            "SELECT atttypid::regtype::text FROM pg_attribute \
+             WHERE attrelid = 'slt_unit_map.t_misc'::regclass AND attname = 'u16'",
+        )
+        .expect("u16 type")
+        .expect("u16 type value");
+        assert_eq!(u16_ty, "integer");
+
+        let u32_ty = Spi::get_one::<String>(
+            "SELECT atttypid::regtype::text FROM pg_attribute \
+             WHERE attrelid = 'slt_unit_map.t_misc'::regclass AND attname = 'u32'",
+        )
+        .expect("u32 type")
+        .expect("u32 type value");
+        assert_eq!(u32_ty, "bigint");
+
+        let dec_ty = Spi::get_one::<String>(
+            "SELECT atttypid::regtype::text FROM pg_attribute \
+             WHERE attrelid = 'slt_unit_map.t_misc'::regclass AND attname = 'dec'",
+        )
+        .expect("dec type")
+        .expect("dec type value");
+        assert_eq!(dec_ty, "numeric");
+
+        let dict_ty = Spi::get_one::<String>(
+            "SELECT atttypid::regtype::text FROM pg_attribute \
+             WHERE attrelid = 'slt_unit_map.t_misc'::regclass AND attname = 'dict'",
+        )
+        .expect("dict type")
+        .expect("dict type value");
+        assert_eq!(dict_ty, "text");
+
+        let u32_max = Spi::get_one::<i64>("SELECT u32 FROM slt_unit_map.t_misc WHERE u16 = 65535")
+            .expect("u32")
+            .expect("u32 value");
+        assert_eq!(u32_max, u32::MAX as i64);
+
+        let dec_ok = Spi::get_one::<bool>(
+            "SELECT dec = 123.45::numeric FROM slt_unit_map.t_misc WHERE u16 = 1",
+        )
+        .expect("dec compare")
+        .expect("dec compare value");
+        assert!(dec_ok);
+
+        let dict = Spi::get_one::<String>("SELECT dict FROM slt_unit_map.t_misc WHERE u16 = 1")
+            .expect("dict")
+            .expect("dict value");
+        assert_eq!(dict, "foo");
+
+        let nulls_ok = Spi::get_one::<bool>(
+            "SELECT dec IS NULL AND dict IS NULL FROM slt_unit_map.t_misc WHERE u16 = 2",
+        )
+        .expect("null check")
+        .expect("null check value");
+        assert!(nulls_ok);
 
         Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
     }

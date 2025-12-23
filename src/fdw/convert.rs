@@ -1,9 +1,11 @@
+use arrow::array::cast::AsArray;
 use arrow::array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, FixedSizeBinaryArray,
-    FixedSizeListArray, Float16Array, Float32Array, Float64Array, GenericListArray, Int16Array,
-    Int32Array, Int64Array, Int8Array, LargeBinaryArray, LargeStringArray, StringArray,
-    StructArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-    TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array, Decimal256Array,
+    FixedSizeBinaryArray, FixedSizeListArray, Float16Array, Float32Array, Float64Array,
+    GenericListArray, Int16Array, Int32Array, Int64Array, Int8Array, LargeBinaryArray,
+    LargeStringArray, StringArray, StructArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt16Array,
+    UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -11,6 +13,7 @@ use chrono::Datelike;
 use pgrx::datum::{Date, Timestamp, TimestampWithTimeZone};
 use pgrx::pg_sys;
 use pgrx::prelude::IntoDatum;
+use pgrx::AnyNumeric;
 use pgrx::JsonB;
 use serde_json::{Map, Number, Value};
 
@@ -255,6 +258,41 @@ pub fn arrow_value_to_datum(
                 let ts = Timestamp::try_from(pg_micros).map_err(|_| "invalid timestamp")?;
                 Ok((ts.into_datum().ok_or("failed to convert timestamp")?, false))
             }
+        }
+        DataType::Decimal128(_, _) => {
+            let v = array
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .ok_or("invalid decimal128 array")?
+                .value_as_string(row_idx);
+            let numeric = AnyNumeric::try_from(v.as_str()).map_err(|_| "invalid numeric")?;
+            Ok((
+                numeric.into_datum().ok_or("failed to convert numeric")?,
+                false,
+            ))
+        }
+        DataType::Decimal256(_, _) => {
+            let v = array
+                .as_any()
+                .downcast_ref::<Decimal256Array>()
+                .ok_or("invalid decimal256 array")?
+                .value_as_string(row_idx);
+            let numeric = AnyNumeric::try_from(v.as_str()).map_err(|_| "invalid numeric")?;
+            Ok((
+                numeric.into_datum().ok_or("failed to convert numeric")?,
+                false,
+            ))
+        }
+        DataType::Dictionary(_, _) => {
+            let dict = array
+                .as_any_dictionary_opt()
+                .ok_or("invalid dictionary array")?;
+            let value_idx = dictionary_key_to_usize(dict.keys(), row_idx)?;
+            let values = dict.values().as_ref();
+            if value_idx >= values.len() {
+                return Err("dictionary key out of range");
+            }
+            arrow_value_to_datum(values, value_idx, target_type_oid)
         }
         DataType::List(_) | DataType::LargeList(_) => {
             let elem_oid = unsafe { pg_sys::get_element_type(target_type_oid) };
@@ -631,6 +669,33 @@ fn arrow_value_to_json(array: &dyn Array, row_idx: usize) -> Result<Value, &'sta
             }
             Ok(Value::Object(map))
         }
+        DataType::Decimal128(_, _) => {
+            let v = array
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .ok_or("invalid decimal128 array")?
+                .value_as_string(row_idx);
+            Ok(Value::String(v))
+        }
+        DataType::Decimal256(_, _) => {
+            let v = array
+                .as_any()
+                .downcast_ref::<Decimal256Array>()
+                .ok_or("invalid decimal256 array")?
+                .value_as_string(row_idx);
+            Ok(Value::String(v))
+        }
+        DataType::Dictionary(_, _) => {
+            let dict = array
+                .as_any_dictionary_opt()
+                .ok_or("invalid dictionary array")?;
+            let value_idx = dictionary_key_to_usize(dict.keys(), row_idx)?;
+            let values = dict.values().as_ref();
+            if value_idx >= values.len() {
+                return Err("dictionary key out of range");
+            }
+            arrow_value_to_json(values, value_idx)
+        }
         _ => Ok(Value::String(format!(
             "<unsupported_type: {:?}>",
             array.data_type()
@@ -640,4 +705,62 @@ fn arrow_value_to_json(array: &dyn Array, row_idx: usize) -> Result<Value, &'sta
 
 fn json_number(v: i64) -> Value {
     Value::Number(Number::from(v))
+}
+
+fn dictionary_key_to_usize(keys: &dyn Array, row_idx: usize) -> Result<usize, &'static str> {
+    match keys.data_type() {
+        DataType::Int8 => {
+            let v = keys
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .ok_or("invalid dictionary keys (int8)")?
+                .value(row_idx) as i64;
+            usize::try_from(v).map_err(|_| "negative dictionary key")
+        }
+        DataType::Int16 => {
+            let v = keys
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .ok_or("invalid dictionary keys (int16)")?
+                .value(row_idx) as i64;
+            usize::try_from(v).map_err(|_| "negative dictionary key")
+        }
+        DataType::Int32 => {
+            let v = keys
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .ok_or("invalid dictionary keys (int32)")?
+                .value(row_idx) as i64;
+            usize::try_from(v).map_err(|_| "negative dictionary key")
+        }
+        DataType::Int64 => {
+            let v = keys
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .ok_or("invalid dictionary keys (int64)")?
+                .value(row_idx);
+            usize::try_from(v).map_err(|_| "negative dictionary key")
+        }
+        DataType::UInt8 => Ok(keys
+            .as_any()
+            .downcast_ref::<UInt8Array>()
+            .ok_or("invalid dictionary keys (uint8)")?
+            .value(row_idx) as usize),
+        DataType::UInt16 => Ok(keys
+            .as_any()
+            .downcast_ref::<UInt16Array>()
+            .ok_or("invalid dictionary keys (uint16)")?
+            .value(row_idx) as usize),
+        DataType::UInt32 => Ok(keys
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .ok_or("invalid dictionary keys (uint32)")?
+            .value(row_idx) as usize),
+        DataType::UInt64 => Ok(keys
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .ok_or("invalid dictionary keys (uint64)")?
+            .value(row_idx) as usize),
+        _ => Err("unsupported dictionary key type"),
+    }
 }
