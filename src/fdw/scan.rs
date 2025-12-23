@@ -4,6 +4,7 @@ use futures::StreamExt;
 use lance_rs::dataset::scanner::DatasetRecordBatchStream;
 use lance_rs::Dataset;
 use pgrx::pg_sys;
+use std::ffi::CString;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
@@ -314,16 +315,73 @@ pub unsafe extern "C-unwind" fn explain_foreign_scan(
 
     let opts = LanceFdwOptions::from_foreign_table(relid).ok();
     if let Some(opts) = opts {
-        let label = match std::ffi::CString::new("Lance URI") {
+        let uri_label = match CString::new("Lance URI") {
             Ok(v) => v,
             Err(_) => return,
         };
 
-        let value = match std::ffi::CString::new(opts.uri.replace('\0', "")) {
+        let uri_value = match CString::new(opts.uri.replace('\0', "")) {
             Ok(v) => v,
             Err(_) => return,
         };
-        pg_sys::ExplainPropertyText(label.as_ptr(), value.as_ptr(), es);
+        pg_sys::ExplainPropertyText(uri_label.as_ptr(), uri_value.as_ptr(), es);
+
+        let batch_label = match CString::new("Batch Size") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        pg_sys::ExplainPropertyInteger(
+            batch_label.as_ptr(),
+            std::ptr::null(),
+            opts.batch_size as i64,
+            es,
+        );
+
+        let projection_label = match CString::new("Projection") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let projection = format_projection_list(relation);
+        let projection_value = match CString::new(projection) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        pg_sys::ExplainPropertyText(projection_label.as_ptr(), projection_value.as_ptr(), es);
+    }
+}
+
+fn format_projection_list(relation: *mut pg_sys::RelationData) -> String {
+    unsafe {
+        if relation.is_null() {
+            return "[]".to_string();
+        }
+
+        let tupdesc = (*relation).rd_att;
+        if tupdesc.is_null() {
+            return "[]".to_string();
+        }
+
+        let natts = (*tupdesc).natts.max(0) as usize;
+        let mut cols = Vec::with_capacity(natts);
+
+        for i in 0..natts {
+            let attr = *(*tupdesc).attrs.as_ptr().add(i);
+            if attr.attisdropped {
+                continue;
+            }
+
+            let name = std::ffi::CStr::from_ptr(attr.attname.data.as_ptr())
+                .to_string_lossy()
+                .to_string();
+            cols.push(name);
+        }
+
+        if cols.is_empty() {
+            "[]".to_string()
+        } else {
+            cols.join(", ")
+        }
     }
 }
 

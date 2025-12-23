@@ -19,3 +19,13 @@ SELECT array_length(embedding, 1) FROM t_fdw ORDER BY id;
 3
 3
 3
+
+query T
+EXPLAIN (VERBOSE, COSTS OFF) SELECT name FROM t_fdw WHERE id = 2;
+----
+Foreign Scan on ${SCHEMA}.t_fdw
+  Output: name
+  Filter: (t_fdw.id = 2)
+  Lance URI: ${LANCE_URI}
+  Batch Size: 1024
+  Projection: id, name, active, embedding, meta
