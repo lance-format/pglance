@@ -217,7 +217,10 @@ pub unsafe extern "C-unwind" fn iterate_foreign_scan(
             }
         }
 
-        let batch = state.current_batch.as_ref().unwrap();
+        let Some(batch) = state.current_batch.as_ref() else {
+            state.current_row = 0;
+            continue;
+        };
         if state.current_row >= batch.num_rows() {
             state.current_batch = None;
             continue;
@@ -311,8 +314,15 @@ pub unsafe extern "C-unwind" fn explain_foreign_scan(
 
     let opts = LanceFdwOptions::from_foreign_table(relid).ok();
     if let Some(opts) = opts {
-        let label = std::ffi::CString::new("Lance URI").unwrap();
-        let value = std::ffi::CString::new(opts.uri).unwrap();
+        let label = match std::ffi::CString::new("Lance URI") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let value = match std::ffi::CString::new(opts.uri.replace('\0', "")) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
         pg_sys::ExplainPropertyText(label.as_ptr(), value.as_ptr(), es);
     }
 }
