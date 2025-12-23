@@ -218,7 +218,10 @@ pub unsafe extern "C-unwind" fn iterate_foreign_scan(
             }
         }
 
-        let batch = state.current_batch.as_ref().unwrap();
+        let Some(batch) = state.current_batch.as_ref() else {
+            state.current_row = 0;
+            continue;
+        };
         if state.current_row >= batch.num_rows() {
             state.current_batch = None;
             continue;
@@ -312,32 +315,40 @@ pub unsafe extern "C-unwind" fn explain_foreign_scan(
 
     let opts = LanceFdwOptions::from_foreign_table(relid).ok();
     if let Some(opts) = opts {
-        let uri_c = CString::new(opts.uri).unwrap_or_else(|_| {
-            pgrx::error!("invalid foreign table option: uri contains NUL byte");
-        });
-        pg_sys::ExplainPropertyText(cstring_label("Lance URI").as_ptr(), uri_c.as_ptr(), es);
+        let uri_label = match CString::new("Lance URI") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
 
+        let uri_value = match CString::new(opts.uri.replace('\0', "")) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        pg_sys::ExplainPropertyText(uri_label.as_ptr(), uri_value.as_ptr(), es);
+
+        let batch_label = match CString::new("Batch Size") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
         pg_sys::ExplainPropertyInteger(
-            cstring_label("Batch Size").as_ptr(),
+            batch_label.as_ptr(),
             std::ptr::null(),
             opts.batch_size as i64,
             es,
         );
 
-        let projection = format_projection_list(relation);
-        let projection_c = CString::new(projection).unwrap_or_else(|_| {
-            pgrx::error!("invalid projection list: contains NUL byte");
-        });
-        pg_sys::ExplainPropertyText(
-            cstring_label("Projection").as_ptr(),
-            projection_c.as_ptr(),
-            es,
-        );
-    }
-}
+        let projection_label = match CString::new("Projection") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
 
-fn cstring_label(s: &'static str) -> CString {
-    CString::new(s).expect("static label must not contain NUL")
+        let projection = format_projection_list(relation);
+        let projection_value = match CString::new(projection) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        pg_sys::ExplainPropertyText(projection_label.as_ptr(), projection_value.as_ptr(), es);
+    }
 }
 
 fn format_projection_list(relation: *mut pg_sys::RelationData) -> String {

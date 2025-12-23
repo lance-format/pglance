@@ -259,10 +259,9 @@ pub fn arrow_value_to_datum(
         DataType::List(_) | DataType::LargeList(_) => {
             let elem_oid = unsafe { pg_sys::get_element_type(target_type_oid) };
             if elem_oid == pg_sys::InvalidOid {
+                let json = arrow_value_to_json(array, row_idx)?;
                 return Ok((
-                    JsonB(arrow_value_to_json(array, row_idx))
-                        .into_datum()
-                        .ok_or("jsonb")?,
+                    JsonB(json).into_datum().ok_or("failed to convert jsonb")?,
                     false,
                 ));
             }
@@ -271,10 +270,9 @@ pub fn arrow_value_to_datum(
         DataType::FixedSizeList(_, _) => {
             let elem_oid = unsafe { pg_sys::get_element_type(target_type_oid) };
             if elem_oid == pg_sys::InvalidOid {
+                let json = arrow_value_to_json(array, row_idx)?;
                 return Ok((
-                    JsonB(arrow_value_to_json(array, row_idx))
-                        .into_datum()
-                        .ok_or("jsonb")?,
+                    JsonB(json).into_datum().ok_or("failed to convert jsonb")?,
                     false,
                 ));
             }
@@ -287,18 +285,20 @@ pub fn arrow_value_to_datum(
                 .ok_or("invalid struct array")?;
             struct_to_composite_datum(struct_array, row_idx, target_type_oid)
         }
-        DataType::Map(_, _) => Ok((
-            JsonB(arrow_value_to_json(array, row_idx))
-                .into_datum()
-                .ok_or("failed to convert jsonb")?,
-            false,
-        )),
-        _ => Ok((
-            JsonB(arrow_value_to_json(array, row_idx))
-                .into_datum()
-                .ok_or("failed to convert jsonb")?,
-            false,
-        )),
+        DataType::Map(_, _) => {
+            let json = arrow_value_to_json(array, row_idx)?;
+            Ok((
+                JsonB(json).into_datum().ok_or("failed to convert jsonb")?,
+                false,
+            ))
+        }
+        _ => {
+            let json = arrow_value_to_json(array, row_idx)?;
+            Ok((
+                JsonB(json).into_datum().ok_or("failed to convert jsonb")?,
+                false,
+            ))
+        }
     }
 }
 
@@ -436,149 +436,155 @@ fn struct_to_composite_datum(
     }
 }
 
-fn arrow_value_to_json(array: &dyn Array, row_idx: usize) -> Value {
+fn arrow_value_to_json(array: &dyn Array, row_idx: usize) -> Result<Value, &'static str> {
     if array.is_null(row_idx) {
-        return Value::Null;
+        return Ok(Value::Null);
     }
 
     match array.data_type() {
-        DataType::Boolean => Value::Bool(
-            array
+        DataType::Boolean => {
+            let v = array
                 .as_any()
                 .downcast_ref::<BooleanArray>()
-                .unwrap()
-                .value(row_idx),
-        ),
-        DataType::Int8 => json_number(
-            array
+                .ok_or("invalid boolean array")?
+                .value(row_idx);
+            Ok(Value::Bool(v))
+        }
+        DataType::Int8 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<Int8Array>()
-                .unwrap()
-                .value(row_idx) as i64,
-        ),
-        DataType::Int16 => json_number(
-            array
+                .ok_or("invalid int8 array")?
+                .value(row_idx) as i64;
+            Ok(json_number(v))
+        }
+        DataType::Int16 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<Int16Array>()
-                .unwrap()
-                .value(row_idx) as i64,
-        ),
-        DataType::Int32 => json_number(
-            array
+                .ok_or("invalid int16 array")?
+                .value(row_idx) as i64;
+            Ok(json_number(v))
+        }
+        DataType::Int32 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<Int32Array>()
-                .unwrap()
-                .value(row_idx) as i64,
-        ),
-        DataType::Int64 => json_number(
-            array
+                .ok_or("invalid int32 array")?
+                .value(row_idx) as i64;
+            Ok(json_number(v))
+        }
+        DataType::Int64 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<Int64Array>()
-                .unwrap()
-                .value(row_idx),
-        ),
-        DataType::UInt8 => json_number(
-            array
+                .ok_or("invalid int64 array")?
+                .value(row_idx);
+            Ok(json_number(v))
+        }
+        DataType::UInt8 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<UInt8Array>()
-                .unwrap()
-                .value(row_idx) as i64,
-        ),
-        DataType::UInt16 => json_number(
-            array
+                .ok_or("invalid uint8 array")?
+                .value(row_idx) as i64;
+            Ok(json_number(v))
+        }
+        DataType::UInt16 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<UInt16Array>()
-                .unwrap()
-                .value(row_idx) as i64,
-        ),
-        DataType::UInt32 => json_number(
-            array
+                .ok_or("invalid uint16 array")?
+                .value(row_idx) as i64;
+            Ok(json_number(v))
+        }
+        DataType::UInt32 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<UInt32Array>()
-                .unwrap()
-                .value(row_idx) as i64,
-        ),
-        DataType::UInt64 => json_number(
-            array
+                .ok_or("invalid uint32 array")?
+                .value(row_idx) as i64;
+            Ok(json_number(v))
+        }
+        DataType::UInt64 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<UInt64Array>()
-                .unwrap()
-                .value(row_idx) as i64,
-        ),
+                .ok_or("invalid uint64 array")?
+                .value(row_idx) as i64;
+            Ok(json_number(v))
+        }
         DataType::Float16 => {
             let v = array
                 .as_any()
                 .downcast_ref::<Float16Array>()
-                .unwrap()
+                .ok_or("invalid float16 array")?
                 .value(row_idx)
                 .to_f32() as f64;
-            Number::from_f64(v)
+            Ok(Number::from_f64(v)
                 .map(Value::Number)
-                .unwrap_or(Value::Null)
+                .unwrap_or(Value::Null))
         }
         DataType::Float32 => {
             let v = array
                 .as_any()
                 .downcast_ref::<Float32Array>()
-                .unwrap()
+                .ok_or("invalid float32 array")?
                 .value(row_idx) as f64;
-            Number::from_f64(v)
+            Ok(Number::from_f64(v)
                 .map(Value::Number)
-                .unwrap_or(Value::Null)
+                .unwrap_or(Value::Null))
         }
         DataType::Float64 => {
             let v = array
                 .as_any()
                 .downcast_ref::<Float64Array>()
-                .unwrap()
+                .ok_or("invalid float64 array")?
                 .value(row_idx);
-            Number::from_f64(v)
+            Ok(Number::from_f64(v)
                 .map(Value::Number)
-                .unwrap_or(Value::Null)
+                .unwrap_or(Value::Null))
         }
-        DataType::Utf8 => Value::String(
-            array
+        DataType::Utf8 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<StringArray>()
-                .unwrap()
-                .value(row_idx)
-                .to_string(),
-        ),
-        DataType::LargeUtf8 => Value::String(
-            array
+                .ok_or("invalid utf8 array")?
+                .value(row_idx);
+            Ok(Value::String(v.to_string()))
+        }
+        DataType::LargeUtf8 => {
+            let v = array
                 .as_any()
                 .downcast_ref::<LargeStringArray>()
-                .unwrap()
-                .value(row_idx)
-                .to_string(),
-        ),
-        DataType::Binary => Value::String(
-            STANDARD.encode(
-                array
-                    .as_any()
-                    .downcast_ref::<BinaryArray>()
-                    .unwrap()
-                    .value(row_idx),
-            ),
-        ),
-        DataType::LargeBinary => Value::String(
-            STANDARD.encode(
-                array
-                    .as_any()
-                    .downcast_ref::<LargeBinaryArray>()
-                    .unwrap()
-                    .value(row_idx),
-            ),
-        ),
-        DataType::FixedSizeBinary(_) => Value::String(
-            STANDARD.encode(
-                array
-                    .as_any()
-                    .downcast_ref::<FixedSizeBinaryArray>()
-                    .unwrap()
-                    .value(row_idx),
-            ),
-        ),
+                .ok_or("invalid large utf8 array")?
+                .value(row_idx);
+            Ok(Value::String(v.to_string()))
+        }
+        DataType::Binary => {
+            let v = array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or("invalid binary array")?
+                .value(row_idx);
+            Ok(Value::String(STANDARD.encode(v)))
+        }
+        DataType::LargeBinary => {
+            let v = array
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .ok_or("invalid large binary array")?
+                .value(row_idx);
+            Ok(Value::String(STANDARD.encode(v)))
+        }
+        DataType::FixedSizeBinary(_) => {
+            let v = array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .ok_or("invalid fixed size binary array")?
+                .value(row_idx);
+            Ok(Value::String(STANDARD.encode(v)))
+        }
         DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => {
             let mut out = Vec::new();
             let values = match array.data_type() {
@@ -586,37 +592,49 @@ fn arrow_value_to_json(array: &dyn Array, row_idx: usize) -> Value {
                     let l = array
                         .as_any()
                         .downcast_ref::<GenericListArray<i32>>()
-                        .unwrap();
+                        .ok_or("invalid list array")?;
                     l.value(row_idx)
                 }
                 DataType::LargeList(_) => {
                     let l = array
                         .as_any()
                         .downcast_ref::<GenericListArray<i64>>()
-                        .unwrap();
+                        .ok_or("invalid large list array")?;
                     l.value(row_idx)
                 }
                 DataType::FixedSizeList(_, _) => {
-                    let l = array.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+                    let l = array
+                        .as_any()
+                        .downcast_ref::<FixedSizeListArray>()
+                        .ok_or("invalid fixed size list array")?;
                     l.value(row_idx)
                 }
-                _ => unreachable!(),
+                _ => return Err("invalid list data type"),
             };
             for i in 0..values.len() {
-                out.push(arrow_value_to_json(values.as_ref(), i));
+                out.push(arrow_value_to_json(values.as_ref(), i)?);
             }
-            Value::Array(out)
+            Ok(Value::Array(out))
         }
         DataType::Struct(fields) => {
-            let struct_array = array.as_any().downcast_ref::<StructArray>().unwrap();
+            let struct_array = array
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .ok_or("invalid struct array")?;
             let mut map = Map::new();
             for (i, f) in fields.iter().enumerate() {
                 let col = struct_array.column(i);
-                map.insert(f.name().clone(), arrow_value_to_json(col.as_ref(), row_idx));
+                map.insert(
+                    f.name().clone(),
+                    arrow_value_to_json(col.as_ref(), row_idx)?,
+                );
             }
-            Value::Object(map)
+            Ok(Value::Object(map))
         }
-        _ => Value::String(format!("<unsupported_type: {:?}>", array.data_type())),
+        _ => Ok(Value::String(format!(
+            "<unsupported_type: {:?}>",
+            array.data_type()
+        ))),
     }
 }
 
