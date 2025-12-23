@@ -120,11 +120,13 @@ pub fn validate_arrow_type_for_pg_oid(
             pg_sys::TEXTOID,
             "arrow utf8 requires postgres text",
         ),
-        DataType::Binary | DataType::LargeBinary | DataType::FixedSizeBinary(_) => require_target_oid(
-            target_type_oid,
-            pg_sys::BYTEAOID,
-            "arrow binary requires postgres bytea",
-        ),
+        DataType::Binary | DataType::LargeBinary | DataType::FixedSizeBinary(_) => {
+            require_target_oid(
+                target_type_oid,
+                pg_sys::BYTEAOID,
+                "arrow binary requires postgres bytea",
+            )
+        }
         DataType::Date32 | DataType::Date64 => require_target_oid(
             target_type_oid,
             pg_sys::DATEOID,
@@ -150,7 +152,9 @@ pub fn validate_arrow_type_for_pg_oid(
             pg_sys::NUMERICOID,
             "arrow decimal requires postgres numeric",
         ),
-        DataType::Dictionary(_, value) => validate_arrow_type_for_pg_oid(value.as_ref(), target_type_oid),
+        DataType::Dictionary(_, value) => {
+            validate_arrow_type_for_pg_oid(value.as_ref(), target_type_oid)
+        }
         DataType::List(elem) | DataType::LargeList(elem) | DataType::FixedSizeList(elem, _) => {
             if target_type_oid == pg_sys::JSONBOID {
                 return Ok(());
@@ -622,10 +626,11 @@ pub fn arrow_value_to_datum(
                 .downcast_ref::<Decimal128Array>()
                 .ok_or_else(|| ConvertError::internal("invalid decimal128 array"))?
                 .value_as_string(row_idx);
-            let numeric =
-                AnyNumeric::try_from(v.as_str()).map_err(|_| ConvertError::internal("invalid numeric"))?;
+            let numeric = AnyNumeric::try_from(v.as_str())
+                .map_err(|_| ConvertError::internal("invalid numeric"))?;
             Ok((
-                numeric.into_datum()
+                numeric
+                    .into_datum()
                     .ok_or_else(|| ConvertError::internal("failed to convert numeric"))?,
                 false,
             ))
@@ -641,10 +646,11 @@ pub fn arrow_value_to_datum(
                 .downcast_ref::<Decimal256Array>()
                 .ok_or_else(|| ConvertError::internal("invalid decimal256 array"))?
                 .value_as_string(row_idx);
-            let numeric =
-                AnyNumeric::try_from(v.as_str()).map_err(|_| ConvertError::internal("invalid numeric"))?;
+            let numeric = AnyNumeric::try_from(v.as_str())
+                .map_err(|_| ConvertError::internal("invalid numeric"))?;
             Ok((
-                numeric.into_datum()
+                numeric
+                    .into_datum()
                     .ok_or_else(|| ConvertError::internal("failed to convert numeric"))?,
                 false,
             ))

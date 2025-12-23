@@ -396,9 +396,7 @@ CREATE SERVER {server} FOREIGN DATA WRAPPER lance_fdw;\n\n"
             .expect("create table");
         let struct_list_uri = struct_list_path.to_str().unwrap();
 
-        let overflow_path = gen
-            .create_table_with_u64_overflow()
-            .expect("create table");
+        let overflow_path = gen.create_table_with_u64_overflow().expect("create table");
         let overflow_uri = overflow_path.to_str().unwrap();
 
         Spi::run("DROP SCHEMA IF EXISTS slt_unit CASCADE").expect("drop schema");
