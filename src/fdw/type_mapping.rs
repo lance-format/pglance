@@ -40,8 +40,10 @@ fn pg_type_for_arrow(
     match field.data_type() {
         DataType::Boolean => Ok("boolean".to_string()),
         DataType::Int8 | DataType::UInt8 => Ok("int2".to_string()),
-        DataType::Int16 | DataType::UInt16 => Ok("int2".to_string()),
-        DataType::Int32 | DataType::UInt32 => Ok("int4".to_string()),
+        DataType::Int16 => Ok("int2".to_string()),
+        DataType::UInt16 => Ok("int4".to_string()),
+        DataType::Int32 => Ok("int4".to_string()),
+        DataType::UInt32 => Ok("int8".to_string()),
         DataType::Int64 | DataType::UInt64 => Ok("int8".to_string()),
         DataType::Float16 | DataType::Float32 => Ok("float4".to_string()),
         DataType::Float64 => Ok("float8".to_string()),

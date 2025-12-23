@@ -1,0 +1,37 @@
+# Ensure declared type mapping matches runtime value conversion.
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_misc', '${LANCE_URI_MISC}', NULL);
+
+query T
+SELECT atttypid::regtype::text
+  FROM pg_attribute
+ WHERE attrelid = 't_misc'::regclass
+   AND attname IN ('u16', 'u32', 'dec', 'dict')
+ ORDER BY attname;
+----
+numeric
+text
+integer
+bigint
+
+query I
+SELECT u32 FROM t_misc WHERE u16 = 65535;
+----
+4294967295
+
+query T
+SELECT dec::text FROM t_misc WHERE u16 = 1;
+----
+123.45
+
+query T
+SELECT dict FROM t_misc WHERE u16 = 1;
+----
+foo
+
+query T
+SELECT (dec IS NULL) AND (dict IS NULL) FROM t_misc WHERE u16 = 2;
+----
+t
+

@@ -4,9 +4,10 @@ use pgrx::prelude::*;
 mod tests {
     use super::*;
     use arrow::array::{
-        Array, BooleanArray, Float32Array, Int32Array, ListBuilder, StringArray, StructArray,
+        builder::StringDictionaryBuilder, Array, BooleanArray, Decimal128Array, Float32Array,
+        Int32Array, ListBuilder, StringArray, StructArray, UInt16Array, UInt32Array,
     };
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::{DataType, Field, Int32Type, Schema};
     use arrow::record_batch::RecordBatch;
     use lance_rs::Dataset;
     use sqllogictest::{DBOutput, DefaultColumnType, Runner};
@@ -145,6 +146,49 @@ mod tests {
             })
         }
 
+        fn create_table_with_decimal_and_dictionary(
+            &self,
+        ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+            let table_path = self.temp_dir.path().join("fdw_misc");
+
+            let u16_array = UInt16Array::from(vec![1, u16::MAX, 2]);
+            let u32_array = UInt32Array::from(vec![1, u32::MAX, 42]);
+
+            let dec_array = Decimal128Array::from(vec![Some(12345i128), Some(-10i128), None])
+                .with_precision_and_scale(10, 2)?;
+
+            let mut dict_builder = StringDictionaryBuilder::<Int32Type>::new();
+            dict_builder.append("foo")?;
+            dict_builder.append("bar")?;
+            dict_builder.append_null();
+            let dict_array = dict_builder.finish();
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("u16", DataType::UInt16, false),
+                Field::new("u32", DataType::UInt32, false),
+                Field::new("dec", dec_array.data_type().clone(), true),
+                Field::new("dict", dict_array.data_type().clone(), true),
+            ]));
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(u16_array),
+                    Arc::new(u32_array),
+                    Arc::new(dec_array),
+                    Arc::new(dict_array),
+                ],
+            )?;
+
+            let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                Dataset::write(reader, table_path.to_str().unwrap(), None).await
+            })?;
+
+            Ok(table_path)
+        }
+
         fn create_table_with_struct_and_list(
             &self,
         ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
@@ -254,10 +298,15 @@ mod tests {
         Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
 
         let gen = LanceTestDataGenerator::new().expect("generator");
-        let path = gen
+        let struct_list_path = gen
             .create_table_with_struct_and_list()
             .expect("create table");
-        let uri = path.to_str().expect("uri").replace('\'', "''");
+        let struct_list_uri = struct_list_path.to_str().expect("uri").replace('\'', "''");
+
+        let misc_path = gen
+            .create_table_with_decimal_and_dictionary()
+            .expect("create table");
+        let misc_uri = misc_path.to_str().expect("uri").replace('\'', "''");
 
         let scripts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sql");
         let slt_files = list_slt_files(&scripts_dir);
@@ -276,7 +325,9 @@ mod tests {
             let server = format!("{}_srv", schema);
 
             let mut script = fs::read_to_string(file).expect("read .slt file");
-            script = script.replace("${LANCE_URI}", &uri);
+            script = script.replace("${LANCE_URI}", &struct_list_uri);
+            script = script.replace("${LANCE_URI_STRUCT_LIST}", &struct_list_uri);
+            script = script.replace("${LANCE_URI_MISC}", &misc_uri);
             script = script.replace("${SCHEMA}", &schema);
             script = script.replace("${SERVER}", &server);
 
