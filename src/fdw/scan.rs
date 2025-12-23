@@ -1,9 +1,10 @@
-use crate::fdw::convert::arrow_value_to_datum;
+use crate::fdw::convert::{arrow_value_to_datum, validate_arrow_type_for_pg_oid, ConvertErrorKind};
 use crate::fdw::options::LanceFdwOptions;
 use futures::StreamExt;
 use lance_rs::dataset::scanner::DatasetRecordBatchStream;
 use lance_rs::Dataset;
 use pgrx::pg_sys;
+use pgrx::{ereport, PgSqlErrorCode};
 use std::ffi::CString;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,7 +18,20 @@ pub struct LanceScanState {
     current_batch: Option<arrow::record_batch::RecordBatch>,
     current_row: usize,
     atttypids: Vec<pg_sys::Oid>,
+    attnames: Vec<Option<String>>,
     att_to_batch_col: Vec<Option<usize>>,
+}
+
+fn pg_type_name(oid: pg_sys::Oid) -> String {
+    unsafe {
+        let ptr = pg_sys::format_type_be(oid);
+        if ptr.is_null() {
+            return format!("oid {}", oid);
+        }
+        let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().to_string();
+        pg_sys::pfree(ptr.cast());
+        s
+    }
 }
 
 #[pgrx::pg_guard]
@@ -108,20 +122,35 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
     let relid = (*relation).rd_id;
 
     let opts = LanceFdwOptions::from_foreign_table(relid).unwrap_or_else(|e| {
-        pgrx::error!("invalid foreign table options: {}", e);
+        ereport!(
+            ERROR,
+            PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME,
+            "invalid foreign table options",
+            format!("relation_oid={} error={}", relid, e),
+        );
     });
 
     let runtime = Arc::new(Runtime::new().unwrap_or_else(|e| {
-        pgrx::error!("failed to create tokio runtime: {}", e);
+        ereport!(
+            ERROR,
+            PgSqlErrorCode::ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+            "failed to create tokio runtime",
+            format!("error={}", e),
+        );
     }));
 
     let dataset = runtime
         .block_on(async { Dataset::open(&opts.uri).await })
         .unwrap_or_else(|e| {
-            pgrx::error!("failed to open dataset {}: {}", opts.uri, e);
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_FDW_TABLE_NOT_FOUND,
+                "failed to open lance dataset",
+                format!("uri={} error={}", opts.uri, e),
+            );
         });
 
-    let stream = create_stream(&runtime, &dataset, opts.batch_size);
+    let stream = create_stream(&runtime, &dataset, &opts.uri, opts.batch_size);
 
     let tupdesc = (*relation).rd_att;
     if tupdesc.is_null() {
@@ -143,22 +172,62 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
         }
     }
 
-    let dataset_field_names: Vec<String> = dataset
-        .schema()
-        .fields
-        .iter()
-        .map(|f| f.name.clone())
-        .collect();
+    let dataset_fields = &dataset.schema().fields;
+    let dataset_field_names: Vec<String> = dataset_fields.iter().map(|f| f.name.clone()).collect();
+    let mut name_to_idx = std::collections::BTreeMap::<String, usize>::new();
+    for (idx, f) in dataset_fields.iter().enumerate() {
+        name_to_idx.insert(f.name.clone(), idx);
+    }
 
     let mut att_to_batch_col = Vec::with_capacity(natts);
-    for name in attnames {
+    for (att_idx, name) in attnames.iter().enumerate() {
         if let Some(name) = name {
-            let idx = dataset_field_names
-                .iter()
-                .position(|n| n == &name)
-                .unwrap_or_else(|| {
-                    pgrx::error!("column not found in dataset schema: {}", name);
-                });
+            let idx = name_to_idx.get(name).copied().unwrap_or_else(|| {
+                ereport!(
+                    ERROR,
+                    PgSqlErrorCode::ERRCODE_FDW_COLUMN_NAME_NOT_FOUND,
+                    "column not found in lance dataset schema",
+                    format!(
+                        "uri={} column={} dataset_columns={}",
+                        opts.uri,
+                        name,
+                        dataset_field_names.join(",")
+                    ),
+                );
+            });
+
+            let field = &dataset_fields[idx];
+            let arrow_type = field.data_type();
+            if let Err(e) = validate_arrow_type_for_pg_oid(&arrow_type, atttypids[att_idx]) {
+                let (errcode, message) = match e.kind {
+                    ConvertErrorKind::TypeMismatch => (
+                        PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE_DESCRIPTORS,
+                        "column type mismatch between foreign table and dataset schema",
+                    ),
+                    ConvertErrorKind::UnsupportedType | ConvertErrorKind::ValueOutOfRange => (
+                        PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE,
+                        "unsupported column type for lance_fdw",
+                    ),
+                    ConvertErrorKind::Internal => (
+                        PgSqlErrorCode::ERRCODE_FDW_ERROR,
+                        "internal lance_fdw schema validation error",
+                    ),
+                };
+                ereport!(
+                    ERROR,
+                    errcode,
+                    message,
+                    format!(
+                        "uri={} column={} arrow_type={} pg_type={} error={}",
+                        opts.uri,
+                        name,
+                        arrow_type,
+                        pg_type_name(atttypids[att_idx]),
+                        e
+                    ),
+                );
+            }
+
             att_to_batch_col.push(Some(idx));
         } else {
             att_to_batch_col.push(None);
@@ -173,6 +242,7 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
         current_batch: None,
         current_row: 0,
         atttypids,
+        attnames: attnames.clone(),
         att_to_batch_col,
     });
 
@@ -210,7 +280,14 @@ pub unsafe extern "C-unwind" fn iterate_foreign_scan(
             let next = state.runtime.block_on(async { state.stream.next().await });
             match next {
                 None => return slot,
-                Some(Err(e)) => pgrx::error!("failed to read next batch: {}", e),
+                Some(Err(e)) => {
+                    ereport!(
+                        ERROR,
+                        PgSqlErrorCode::ERRCODE_FDW_ERROR,
+                        "failed to read next record batch",
+                        format!("uri={} error={}", state.opts.uri, e),
+                    );
+                }
                 Some(Ok(batch)) => {
                     state.current_batch = Some(batch);
                     state.current_row = 0;
@@ -250,12 +327,48 @@ pub unsafe extern "C-unwind" fn iterate_foreign_scan(
                 .copied()
                 .flatten()
                 .unwrap_or_else(|| {
-                    pgrx::error!("missing batch column mapping for attribute {}", i + 1);
+                    ereport!(
+                        ERROR,
+                        PgSqlErrorCode::ERRCODE_FDW_INCONSISTENT_DESCRIPTOR_INFORMATION,
+                        "missing batch column mapping for attribute",
+                        format!("attribute_number={}", i + 1),
+                    );
                 });
             let col = batch.column(batch_idx);
             let (datum, isnull) = arrow_value_to_datum(col.as_ref(), row, state.atttypids[i])
                 .unwrap_or_else(|e| {
-                    pgrx::error!("failed to convert column {}: {}", i + 1, e);
+                    let col_name = state
+                        .attnames
+                        .get(i)
+                        .and_then(|v| v.as_deref())
+                        .unwrap_or("<unknown>");
+                    let (errcode, message) = match e.kind {
+                        ConvertErrorKind::TypeMismatch => (
+                            PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE_DESCRIPTORS,
+                            "column type mismatch between foreign table and dataset schema",
+                        ),
+                        ConvertErrorKind::UnsupportedType | ConvertErrorKind::ValueOutOfRange => (
+                            PgSqlErrorCode::ERRCODE_FDW_INVALID_DATA_TYPE,
+                            "unsupported column type for lance_fdw",
+                        ),
+                        ConvertErrorKind::Internal => (
+                            PgSqlErrorCode::ERRCODE_FDW_ERROR,
+                            "internal lance_fdw conversion error",
+                        ),
+                    };
+                    ereport!(
+                        ERROR,
+                        errcode,
+                        message,
+                        format!(
+                            "uri={} column={} arrow_type={} pg_type={} error={}",
+                            state.opts.uri,
+                            col_name,
+                            col.data_type(),
+                            pg_type_name(state.atttypids[i]),
+                            e
+                        ),
+                    );
                 });
             *(*slot).tts_values.add(i) = datum;
             *(*slot).tts_isnull.add(i) = isnull;
@@ -277,7 +390,12 @@ pub unsafe extern "C-unwind" fn rescan_foreign_scan(node: *mut pg_sys::ForeignSc
         return;
     }
     let state = &mut *state_ptr;
-    let stream = create_stream(&state.runtime, &state.dataset, state.opts.batch_size);
+    let stream = create_stream(
+        &state.runtime,
+        &state.dataset,
+        &state.opts.uri,
+        state.opts.batch_size,
+    );
     state.stream = Box::pin(stream);
     state.current_batch = None;
     state.current_row = 0;
@@ -388,11 +506,19 @@ fn format_projection_list(relation: *mut pg_sys::RelationData) -> String {
 fn create_stream(
     runtime: &Arc<Runtime>,
     dataset: &Dataset,
+    uri: &str,
     batch_size: usize,
 ) -> DatasetRecordBatchStream {
     let mut scanner = dataset.scan();
     scanner.batch_size(batch_size);
     runtime
         .block_on(async { scanner.try_into_stream().await })
-        .unwrap_or_else(|e| pgrx::error!("failed to create scanner stream: {}", e))
+        .unwrap_or_else(|e| {
+            ereport!(
+                ERROR,
+                PgSqlErrorCode::ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
+                "failed to create scanner stream",
+                format!("uri={} error={}", uri, e),
+            );
+        })
 }
