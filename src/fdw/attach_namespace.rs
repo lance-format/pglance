@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::CString;
 use tokio::runtime::Runtime;
 
-const OPT_NS_TABLE_ID: &str = "ns.table_id";
+pub(crate) const OPT_NS_TABLE_ID: &str = "ns.table_id";
 
 pub type TableId = Vec<String>;
 pub type AttachNamespaceRow = (JsonB, String, String, String, String, String);
@@ -75,7 +75,7 @@ pub fn attach_namespace(
     Ok(out)
 }
 
-fn foreign_server_oid_by_name(server_name: &str) -> Result<pg_sys::Oid, String> {
+pub(crate) fn foreign_server_oid_by_name(server_name: &str) -> Result<pg_sys::Oid, String> {
     let c = CString::new(server_name).map_err(|_| "server_name contains NUL".to_string())?;
     let oid = unsafe { pg_sys::get_foreign_server_oid(c.as_ptr(), true) };
     if oid == pg_sys::InvalidOid {
@@ -84,7 +84,7 @@ fn foreign_server_oid_by_name(server_name: &str) -> Result<pg_sys::Oid, String> 
     Ok(oid)
 }
 
-fn list_table_ids(
+pub(crate) fn list_table_ids(
     runtime: &Runtime,
     namespace: &dyn LanceNamespace,
     root_namespace_id: TableId,
@@ -152,7 +152,10 @@ fn list_table_ids(
     Ok(out)
 }
 
-fn build_mapping(schema_prefix: &str, table_ids: &[TableId]) -> Result<MappingResult, String> {
+pub(crate) fn build_mapping(
+    schema_prefix: &str,
+    table_ids: &[TableId],
+) -> Result<MappingResult, String> {
     let mut by_local = BTreeMap::<LocalMapping, Vec<TableId>>::new();
     for table_id in table_ids {
         let (schema, table) = schema_and_table_for_table_id(schema_prefix, table_id)?;
@@ -188,7 +191,7 @@ fn row_error(table_id: &[String], schema_prefix: &str, detail: &str) -> AttachNa
     )
 }
 
-struct AttachContext<'a> {
+pub(crate) struct AttachContext<'a> {
     runtime: &'a Runtime,
     namespace: std::sync::Arc<dyn LanceNamespace>,
     server_name: &'a str,
@@ -196,7 +199,25 @@ struct AttachContext<'a> {
     dry_run: bool,
 }
 
-fn attach_one(
+impl<'a> AttachContext<'a> {
+    pub(crate) fn new(
+        runtime: &'a Runtime,
+        namespace: std::sync::Arc<dyn LanceNamespace>,
+        server_name: &'a str,
+        batch_size: Option<i64>,
+        dry_run: bool,
+    ) -> Self {
+        Self {
+            runtime,
+            namespace,
+            server_name,
+            batch_size,
+            dry_run,
+        }
+    }
+}
+
+pub(crate) fn attach_one(
     ctx: &AttachContext<'_>,
     table_id: &[String],
     local_schema: &str,

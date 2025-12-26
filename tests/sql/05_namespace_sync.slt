@@ -1,0 +1,52 @@
+# Sync a namespace recursively and reconcile local objects.
+
+statement ok
+DROP SERVER IF EXISTS ${SERVER} CASCADE;
+
+statement ok
+CREATE SERVER ${SERVER} FOREIGN DATA WRAPPER lance_fdw
+  OPTIONS ("ns.impl" 'dir', "ns.root" '${LANCE_NS_ROOT}', "ns.manifest_enabled" 'true', "ns.dir_listing_enabled" 'true');
+
+# Prepare local drift and local-only state.
+
+statement ok
+CREATE FOREIGN TABLE ${SCHEMA}.t_root(id text)
+  SERVER ${SERVER} OPTIONS ("ns.table_id" '["t_root"]');
+
+statement ok
+CREATE FOREIGN TABLE ${SCHEMA}.ghost(id int4)
+  SERVER ${SERVER} OPTIONS ("ns.table_id" '["ghost"]');
+
+query TTT
+SELECT local_table, action, status
+  FROM lance_sync_namespace('${SERVER}', ARRAY[]::text[], '${SCHEMA}', false, false, false)
+ ORDER BY local_table, action, status;
+----
+ghost drift ok
+t_root drift ok
+train create_table ok
+
+query TTT
+SELECT local_table, action, status
+  FROM lance_sync_namespace('${SERVER}', ARRAY[]::text[], '${SCHEMA}', true, true, false)
+ ORDER BY local_table, action, status;
+----
+ghost drop_table ok
+t_root recreate_table ok
+train in_sync ok
+
+query I
+SELECT count(*) FROM t_root;
+----
+3
+
+query I
+SELECT count(*) FROM ${SCHEMA}__teama__images.train;
+----
+3
+
+query T
+SELECT to_regclass('${SCHEMA}.ghost') IS NULL;
+----
+t
+

@@ -85,6 +85,38 @@ fn lance_attach_namespace(
     TableIterator::new(rows)
 }
 
+#[pg_extern]
+fn lance_sync_namespace(
+    server_name: &str,
+    root_namespace_id: default!(Vec<String>, "ARRAY[]::text[]"),
+    schema_prefix: default!(&str, "'lance'"),
+    drop_missing: default!(bool, "false"),
+    recreate_changed: default!(bool, "false"),
+    dry_run: default!(bool, "false"),
+) -> TableIterator<
+    'static,
+    (
+        name!(table_id, JsonB),
+        name!(local_schema, String),
+        name!(local_table, String),
+        name!(action, String),
+        name!(status, String),
+        name!(detail, String),
+    ),
+> {
+    let rows = fdw::sync_namespace::sync_namespace(
+        server_name,
+        root_namespace_id,
+        schema_prefix,
+        drop_missing,
+        recreate_changed,
+        dry_run,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_sync_namespace failed: {}", e));
+
+    TableIterator::new(rows)
+}
+
 #[cfg(any(test, feature = "pg_test"))]
 mod tests;
 
