@@ -27,7 +27,12 @@ fn lance_fdw_validator(options: Vec<String>, _catalog: pg_sys::Oid) {
             .ok_or_else(|| format!("invalid option format: {}", opt))
             .unwrap_or_else(|e| pgrx::error!("{}", e));
 
-        if k == "uri" || k == "batch_size" || k.starts_with("aws_") || k.starts_with("s3_") {
+        if k == "uri"
+            || k == "batch_size"
+            || k.starts_with("aws_")
+            || k.starts_with("s3_")
+            || k.starts_with("ns.")
+        {
             continue;
         }
 
