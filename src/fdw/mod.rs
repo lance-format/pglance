@@ -7,4 +7,5 @@ pub mod namespace;
 pub mod naming;
 pub mod options;
 pub mod scan;
+pub mod sync_namespace;
 pub mod type_mapping;
