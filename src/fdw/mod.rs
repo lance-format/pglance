@@ -1,7 +1,10 @@
+pub mod attach_namespace;
 pub mod convert;
+pub mod ddl;
 pub mod handler;
 pub mod import;
 pub mod namespace;
+pub mod naming;
 pub mod options;
 pub mod scan;
 pub mod type_mapping;

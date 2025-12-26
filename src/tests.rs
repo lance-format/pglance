@@ -104,29 +104,41 @@ mod tests {
 
     fn slt_identifier(input: &str) -> String {
         let mut out = String::with_capacity(input.len());
+
+        let mut last_was_underscore = false;
         for ch in input.chars() {
-            if ch.is_ascii_alphanumeric() {
-                out.push(ch.to_ascii_lowercase());
+            let lower = ch.to_ascii_lowercase();
+            let ok = matches!(lower, 'a'..='z' | '0'..='9' | '_');
+            let mapped = if ok { lower } else { '_' };
+
+            if mapped == '_' {
+                if last_was_underscore {
+                    continue;
+                }
+                last_was_underscore = true;
             } else {
-                out.push('_');
+                last_was_underscore = false;
             }
+
+            out.push(mapped);
         }
+
+        while out.starts_with('_') {
+            out.remove(0);
+        }
+        while out.ends_with('_') {
+            out.pop();
+        }
+
         if out.is_empty() {
             out.push('_');
         }
-        let first = out.as_bytes()[0];
-        if !first.is_ascii_alphabetic() && first != b'_' {
-            out.insert(0, '_');
-        }
+
         if out.len() > 50 {
             out.truncate(50);
         }
-        out
-    }
 
-    fn quote_literal(value: &str) -> String {
-        let escaped = value.replace('\'', "''");
-        format!("'{}'", escaped)
+        out
     }
 
     fn list_slt_files(dir: &Path) -> Vec<PathBuf> {
@@ -157,6 +169,48 @@ mod tests {
             table_name: &str,
         ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
             let table_path = root.join(format!("{}.lance", table_name));
+
+            let id_array = Int32Array::from(vec![1, 2, 3]);
+            let name_array = StringArray::from(vec!["Alice", "Bob", "Charlie"]);
+            let active_array = BooleanArray::from(vec![true, false, true]);
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("name", DataType::Utf8, false),
+                Field::new("active", DataType::Boolean, false),
+            ]));
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(id_array),
+                    Arc::new(name_array),
+                    Arc::new(active_array),
+                ],
+            )?;
+
+            let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                Dataset::write(reader, table_path.to_str().unwrap(), None).await
+            })?;
+
+            Ok(table_path)
+        }
+
+        fn create_dir_namespace_nested_table(
+            &self,
+            root: &Path,
+            namespace: &[&str],
+            table_name: &str,
+        ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+            let mut dir = root.to_path_buf();
+            for seg in namespace {
+                dir = dir.join(seg);
+            }
+            fs::create_dir_all(&dir)?;
+
+            let table_path = dir.join(format!("{}.lance", table_name));
 
             let id_array = Int32Array::from(vec![1, 2, 3]);
             let name_array = StringArray::from(vec!["Alice", "Bob", "Charlie"]);
@@ -325,80 +379,6 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_fdw_import_and_scan() {
-        Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
-
-        let gen = LanceTestDataGenerator::new().expect("generator");
-        let path = gen
-            .create_table_with_struct_and_list()
-            .expect("create table");
-        let uri = path.to_str().unwrap();
-
-        Spi::run("DROP SCHEMA IF EXISTS slt_unit CASCADE").expect("drop schema");
-        Spi::run("CREATE SCHEMA slt_unit").expect("create schema");
-        Spi::run("SET search_path TO slt_unit, public").expect("set search_path");
-        Spi::run("DROP SERVER IF EXISTS lance_srv_unit CASCADE").expect("drop server");
-        Spi::run("CREATE SERVER lance_srv_unit FOREIGN DATA WRAPPER lance_fdw")
-            .expect("create server");
-
-        let import_sql = format!(
-            "SELECT lance_import('lance_srv_unit', 'slt_unit', 't_fdw', '{}', NULL)",
-            uri.replace('\'', "''")
-        );
-        Spi::run(&import_sql).expect("lance_import");
-
-        let cnt = Spi::get_one::<i64>("SELECT count(*) FROM slt_unit.t_fdw")
-            .expect("count")
-            .expect("count value");
-        assert_eq!(cnt, 3);
-
-        let v = Spi::get_one::<String>("SELECT name FROM slt_unit.t_fdw WHERE id = 2")
-            .expect("select")
-            .expect("value");
-        assert_eq!(v, "Bob");
-
-        Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
-    }
-
-    #[pg_test]
-    fn test_fdw_dir_namespace_scan() {
-        Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
-
-        let gen = LanceTestDataGenerator::new().expect("generator");
-        let root = gen.temp_dir.path().join("ns_root");
-        fs::create_dir_all(&root).expect("create ns_root");
-        gen.create_dir_namespace_simple_table(&root, "t_ns")
-            .expect("create namespace table");
-
-        Spi::run("DROP SCHEMA IF EXISTS slt_unit CASCADE").expect("drop schema");
-        Spi::run("CREATE SCHEMA slt_unit").expect("create schema");
-        Spi::run("SET search_path TO slt_unit, public").expect("set search_path");
-        Spi::run("DROP SERVER IF EXISTS lance_ns_unit CASCADE").expect("drop server");
-
-        let create_server = format!(
-            "CREATE SERVER lance_ns_unit FOREIGN DATA WRAPPER lance_fdw OPTIONS (\"ns.impl\" 'dir', \"ns.root\" {});",
-            quote_literal(root.to_str().unwrap())
-        );
-        Spi::run(&create_server).expect("create server");
-
-        let create_table = "CREATE FOREIGN TABLE slt_unit.t_ns(id int4, name text, active bool) \
-            SERVER lance_ns_unit OPTIONS (\"ns.table_id\" '[\"t_ns\"]');";
-        Spi::run(create_table).expect("create foreign table");
-
-        let cnt = Spi::get_one::<i64>("SELECT count(*) FROM slt_unit.t_ns")
-            .expect("count")
-            .expect("count value");
-        assert_eq!(cnt, 3);
-
-        let v = Spi::get_one::<String>("SELECT name FROM slt_unit.t_ns WHERE id = 2")
-            .expect("select")
-            .expect("value");
-        assert_eq!(v, "Bob");
-
-        Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
-    }
-
-    #[pg_test]
     fn test_sqllogictest() {
         Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
 
@@ -412,6 +392,55 @@ mod tests {
             .create_table_with_decimal_and_dictionary()
             .expect("create table");
         let misc_uri = misc_path.to_str().expect("uri").replace('\'', "''");
+
+        let overflow_path = gen.create_table_with_u64_overflow().expect("create table");
+        let overflow_uri = overflow_path.to_str().expect("uri").replace('\'', "''");
+
+        let bad_uri = gen
+            .temp_dir
+            .path()
+            .join("does_not_exist")
+            .to_str()
+            .expect("uri")
+            .replace('\'', "''");
+
+        let ns_root = gen.temp_dir.path().join("ns_root");
+        fs::create_dir_all(&ns_root).expect("create ns_root");
+        gen.create_dir_namespace_simple_table(&ns_root, "t_root")
+            .expect("create root table");
+        gen.create_dir_namespace_nested_table(&ns_root, &["TeamA", "images"], "train")
+            .expect("create nested table");
+
+        let ns_root_uri = ns_root.to_str().expect("uri").replace('\'', "''");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use lance_namespace::models::{CreateNamespaceRequest, RegisterTableRequest};
+            use lance_namespace::LanceNamespace;
+            use lance_namespace_impls::DirectoryNamespaceBuilder;
+
+            let ns = DirectoryNamespaceBuilder::new(ns_root.to_str().unwrap())
+                .manifest_enabled(true)
+                .dir_listing_enabled(true)
+                .build()
+                .await
+                .expect("build namespace");
+
+            let mut req = CreateNamespaceRequest::new();
+            req.id = Some(vec!["TeamA".to_string()]);
+            ns.create_namespace(req).await.expect("create TeamA");
+
+            let mut req = CreateNamespaceRequest::new();
+            req.id = Some(vec!["TeamA".to_string(), "images".to_string()]);
+            ns.create_namespace(req).await.expect("create TeamA/images");
+
+            let mut reg = RegisterTableRequest::new("TeamA/images/train.lance".to_string());
+            reg.id = Some(vec![
+                "TeamA".to_string(),
+                "images".to_string(),
+                "train".to_string(),
+            ]);
+            ns.register_table(reg).await.expect("register table");
+        });
 
         let scripts_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sql");
         let slt_files = list_slt_files(&scripts_dir);
@@ -433,6 +462,9 @@ mod tests {
             script = script.replace("${LANCE_URI}", &struct_list_uri);
             script = script.replace("${LANCE_URI_STRUCT_LIST}", &struct_list_uri);
             script = script.replace("${LANCE_URI_MISC}", &misc_uri);
+            script = script.replace("${LANCE_URI_OVERFLOW}", &overflow_uri);
+            script = script.replace("${LANCE_BAD_URI}", &bad_uri);
+            script = script.replace("${LANCE_NS_ROOT}", &ns_root_uri);
             script = script.replace("${SCHEMA}", &schema);
             script = script.replace("${SERVER}", &server);
 
@@ -455,126 +487,6 @@ CREATE SERVER {server} FOREIGN DATA WRAPPER lance_fdw;\n\n"
                 panic!("{}", e.display(false));
             }
         }
-
-        Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
-    }
-
-    #[pg_test]
-    fn test_fdw_diagnostic_errors() {
-        Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
-
-        let gen = LanceTestDataGenerator::new().expect("generator");
-        let struct_list_path = gen
-            .create_table_with_struct_and_list()
-            .expect("create table");
-        let struct_list_uri = struct_list_path.to_str().unwrap();
-
-        let overflow_path = gen.create_table_with_u64_overflow().expect("create table");
-        let overflow_uri = overflow_path.to_str().unwrap();
-
-        Spi::run("DROP SCHEMA IF EXISTS slt_unit CASCADE").expect("drop schema");
-        Spi::run("CREATE SCHEMA slt_unit").expect("create schema");
-        Spi::run("SET search_path TO slt_unit, public").expect("set search_path");
-        Spi::run("DROP SERVER IF EXISTS lance_srv_unit CASCADE").expect("drop server");
-        Spi::run("CREATE SERVER lance_srv_unit FOREIGN DATA WRAPPER lance_fdw")
-            .expect("create server");
-
-        Spi::run(
-            "CREATE OR REPLACE FUNCTION slt_unit.capture_error(sql text) \
-             RETURNS jsonb LANGUAGE plpgsql AS $$ \
-             DECLARE st text; msg text; det text; \
-             BEGIN \
-               EXECUTE sql; \
-               RETURN NULL; \
-             EXCEPTION WHEN OTHERS THEN \
-               GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL; \
-               RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det); \
-             END $$;",
-        )
-        .expect("create capture_error");
-
-        let create_missing = format!(
-            "CREATE FOREIGN TABLE slt_unit.t_missing(id int4, missing_col text) \
-             SERVER lance_srv_unit OPTIONS (uri {});",
-            quote_literal(struct_list_uri)
-        );
-        Spi::run(&create_missing).expect("create t_missing");
-        let st = Spi::get_one::<String>(&format!(
-            "SELECT capture_error({})->>'sqlstate'",
-            quote_literal("SELECT count(*) FROM slt_unit.t_missing")
-        ))
-        .expect("capture missing")
-        .expect("state");
-        assert_eq!(st, "HV005");
-
-        let create_mismatch = format!(
-            "CREATE FOREIGN TABLE slt_unit.t_mismatch(id text) \
-             SERVER lance_srv_unit OPTIONS (uri {});",
-            quote_literal(struct_list_uri)
-        );
-        Spi::run(&create_mismatch).expect("create t_mismatch");
-        let st = Spi::get_one::<String>(&format!(
-            "SELECT capture_error({})->>'sqlstate'",
-            quote_literal("SELECT count(*) FROM slt_unit.t_mismatch")
-        ))
-        .expect("capture mismatch")
-        .expect("state");
-        assert_eq!(st, "HV006");
-
-        Spi::run("CREATE TYPE slt_unit.meta_bad AS (score float4, missing text);")
-            .expect("create meta_bad");
-        let create_struct_mismatch = format!(
-            "CREATE FOREIGN TABLE slt_unit.t_struct_mismatch(id int4, meta slt_unit.meta_bad) \
-             SERVER lance_srv_unit OPTIONS (uri {});",
-            quote_literal(struct_list_uri)
-        );
-        Spi::run(&create_struct_mismatch).expect("create t_struct_mismatch");
-        let st = Spi::get_one::<String>(&format!(
-            "SELECT capture_error({})->>'sqlstate'",
-            quote_literal("SELECT count(*) FROM slt_unit.t_struct_mismatch")
-        ))
-        .expect("capture struct mismatch")
-        .expect("state");
-        assert_eq!(st, "HV006");
-
-        let bad_uri = gen.temp_dir.path().join("does_not_exist");
-        let create_bad_uri = format!(
-            "CREATE FOREIGN TABLE slt_unit.t_bad_uri(id int4) \
-             SERVER lance_srv_unit OPTIONS (uri {});",
-            quote_literal(bad_uri.to_str().unwrap())
-        );
-        Spi::run(&create_bad_uri).expect("create t_bad_uri");
-        let st = Spi::get_one::<String>(&format!(
-            "SELECT capture_error({})->>'sqlstate'",
-            quote_literal("SELECT count(*) FROM slt_unit.t_bad_uri")
-        ))
-        .expect("capture bad uri")
-        .expect("state");
-        assert_eq!(st, "HV00R");
-
-        let create_overflow = format!(
-            "CREATE FOREIGN TABLE slt_unit.t_u64_overflow(id int4, u64 int8) \
-             SERVER lance_srv_unit OPTIONS (uri {});",
-            quote_literal(overflow_uri)
-        );
-        Spi::run(&create_overflow).expect("create t_u64_overflow");
-        let st = Spi::get_one::<String>(&format!(
-            "SELECT capture_error({})->>'sqlstate'",
-            quote_literal("SELECT count(*) FROM slt_unit.t_u64_overflow")
-        ))
-        .expect("capture overflow")
-        .expect("state");
-        assert_eq!(st, "HV004");
-
-        let detail = Spi::get_one::<String>(&format!(
-            "SELECT capture_error({})->>'detail'",
-            quote_literal("SELECT count(*) FROM slt_unit.t_u64_overflow")
-        ))
-        .expect("capture overflow detail")
-        .expect("detail");
-        assert!(detail.contains("arrow_type="));
-        assert!(detail.contains("pg_type="));
-        assert!(detail.contains("uri="));
 
         Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
     }
