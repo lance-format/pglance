@@ -1,0 +1,41 @@
+# Attach a directory-backed namespace recursively and verify schema mapping.
+
+statement ok
+DROP SERVER IF EXISTS ${SERVER} CASCADE;
+
+statement ok
+CREATE SERVER ${SERVER} FOREIGN DATA WRAPPER lance_fdw
+  OPTIONS ("ns.impl" 'dir', "ns.root" '${LANCE_NS_ROOT}', "ns.manifest_enabled" 'true', "ns.dir_listing_enabled" 'true');
+
+statement ok
+CREATE TEMP TABLE attach_result AS
+  SELECT local_schema, local_table, status, detail
+    FROM lance_attach_namespace('${SERVER}', ARRAY[]::text[], '${SCHEMA}', NULL, 1000, false);
+
+query I
+SELECT count(*) FROM attach_result;
+----
+2
+
+query TTT
+SELECT local_schema, local_table, status
+  FROM attach_result
+ ORDER BY local_schema, local_table;
+----
+${SCHEMA} t_root ok
+${SCHEMA}__teama__images train ok
+
+query I
+SELECT count(*) FROM t_root;
+----
+3
+
+query I
+SELECT count(*) FROM ${SCHEMA}__teama__images.train;
+----
+3
+
+query T
+SELECT name FROM ${SCHEMA}__teama__images.train WHERE id = 2;
+----
+Bob

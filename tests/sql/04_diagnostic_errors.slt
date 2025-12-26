@@ -1,0 +1,70 @@
+# Verify diagnostic SQLSTATEs and detail fields.
+
+statement ok
+CREATE OR REPLACE FUNCTION capture_error(sql text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text;
+BEGIN
+  EXECUTE sql;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL;
+  RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det);
+END $$;
+
+statement ok
+CREATE FOREIGN TABLE t_missing(id int4, missing_col text)
+  SERVER ${SERVER} OPTIONS (uri '${LANCE_URI_STRUCT_LIST}');
+
+query T
+SELECT capture_error('SELECT count(*) FROM t_missing')->>'sqlstate';
+----
+HV005
+
+statement ok
+CREATE FOREIGN TABLE t_mismatch(id text)
+  SERVER ${SERVER} OPTIONS (uri '${LANCE_URI_STRUCT_LIST}');
+
+query T
+SELECT capture_error('SELECT count(*) FROM t_mismatch')->>'sqlstate';
+----
+HV006
+
+statement ok
+CREATE TYPE meta_bad AS (score float4, missing text);
+
+statement ok
+CREATE FOREIGN TABLE t_struct_mismatch(id int4, meta meta_bad)
+  SERVER ${SERVER} OPTIONS (uri '${LANCE_URI_STRUCT_LIST}');
+
+query T
+SELECT capture_error('SELECT count(*) FROM t_struct_mismatch')->>'sqlstate';
+----
+HV006
+
+statement ok
+CREATE FOREIGN TABLE t_bad_uri(id int4)
+  SERVER ${SERVER} OPTIONS (uri '${LANCE_BAD_URI}');
+
+query T
+SELECT capture_error('SELECT count(*) FROM t_bad_uri')->>'sqlstate';
+----
+HV00R
+
+statement ok
+CREATE FOREIGN TABLE t_u64_overflow(id int4, u64 int8)
+  SERVER ${SERVER} OPTIONS (uri '${LANCE_URI_OVERFLOW}');
+
+query T
+SELECT capture_error('SELECT count(*) FROM t_u64_overflow')->>'sqlstate';
+----
+HV004
+
+query T
+SELECT (capture_error('SELECT count(*) FROM t_u64_overflow')->>'detail' LIKE '%arrow_type=%')
+   AND (capture_error('SELECT count(*) FROM t_u64_overflow')->>'detail' LIKE '%pg_type=%')
+   AND (capture_error('SELECT count(*) FROM t_u64_overflow')->>'detail' LIKE '%uri=%');
+----
+t
+

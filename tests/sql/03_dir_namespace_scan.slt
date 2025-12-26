@@ -1,0 +1,23 @@
+# Scan a namespace-backed table using ns.table_id.
+
+statement ok
+DROP SERVER IF EXISTS ${SERVER} CASCADE;
+
+statement ok
+CREATE SERVER ${SERVER} FOREIGN DATA WRAPPER lance_fdw
+  OPTIONS ("ns.impl" 'dir', "ns.root" '${LANCE_NS_ROOT}');
+
+statement ok
+CREATE FOREIGN TABLE t_ns(id int4, name text, active bool)
+  SERVER ${SERVER} OPTIONS ("ns.table_id" '["t_root"]');
+
+query I
+SELECT count(*) FROM t_ns;
+----
+3
+
+query T
+SELECT name FROM t_ns WHERE id = 2;
+----
+Bob
+

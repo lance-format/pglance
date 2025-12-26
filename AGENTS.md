@@ -7,6 +7,7 @@ This repository contains `pglance`, a Rust crate that builds a PostgreSQL extens
 - Prefer small, reviewable patches that keep behavior stable unless explicitly requested.
 - Prioritize correctness and safety (FDW behavior, type mapping, and DDL generation are user-facing).
 - Avoid “drive-by” refactors and feature additions that are not required for the task.
+- Implement behavior tests using `sqllogictest` scripts under `tests/sql/` whenever possible.
 
 ## Project Facts (easy to get wrong)
 
@@ -48,4 +49,3 @@ If `pgrx` is not initialized yet:
 
 - `src/lib.rs`: extension entry points and pgrx exports
 - `src/fdw/`: FDW implementation (options, import, scan, type mapping, conversions)
-

@@ -1,4 +1,5 @@
 use pgrx::prelude::*;
+use pgrx::JsonB;
 
 mod fdw;
 
@@ -50,6 +51,38 @@ fn lance_import(
 ) {
     fdw::import::import_lance_table(server_name, local_schema, table_name, uri, batch_size)
         .unwrap_or_else(|e| pgrx::error!("lance_import failed: {}", e));
+}
+
+#[pg_extern]
+fn lance_attach_namespace(
+    server_name: &str,
+    root_namespace_id: default!(Vec<String>, "ARRAY[]::text[]"),
+    schema_prefix: default!(&str, "'lance'"),
+    batch_size: default!(Option<i64>, "NULL"),
+    limit_per_list_call: default!(i32, "1000"),
+    dry_run: default!(bool, "false"),
+) -> TableIterator<
+    'static,
+    (
+        name!(table_id, JsonB),
+        name!(local_schema, String),
+        name!(local_table, String),
+        name!(action, String),
+        name!(status, String),
+        name!(detail, String),
+    ),
+> {
+    let rows = fdw::attach_namespace::attach_namespace(
+        server_name,
+        root_namespace_id,
+        schema_prefix,
+        batch_size,
+        limit_per_list_call,
+        dry_run,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_attach_namespace failed: {}", e));
+
+    TableIterator::new(rows)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
