@@ -151,6 +151,41 @@ mod tests {
             })
         }
 
+        fn create_dir_namespace_simple_table(
+            &self,
+            root: &Path,
+            table_name: &str,
+        ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+            let table_path = root.join(format!("{}.lance", table_name));
+
+            let id_array = Int32Array::from(vec![1, 2, 3]);
+            let name_array = StringArray::from(vec!["Alice", "Bob", "Charlie"]);
+            let active_array = BooleanArray::from(vec![true, false, true]);
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("id", DataType::Int32, false),
+                Field::new("name", DataType::Utf8, false),
+                Field::new("active", DataType::Boolean, false),
+            ]));
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(id_array),
+                    Arc::new(name_array),
+                    Arc::new(active_array),
+                ],
+            )?;
+
+            let reader = arrow::record_batch::RecordBatchIterator::new(vec![Ok(batch)], schema);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                Dataset::write(reader, table_path.to_str().unwrap(), None).await
+            })?;
+
+            Ok(table_path)
+        }
+
         fn create_table_with_decimal_and_dictionary(
             &self,
         ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
@@ -318,6 +353,44 @@ mod tests {
         assert_eq!(cnt, 3);
 
         let v = Spi::get_one::<String>("SELECT name FROM slt_unit.t_fdw WHERE id = 2")
+            .expect("select")
+            .expect("value");
+        assert_eq!(v, "Bob");
+
+        Spi::run("SELECT pg_advisory_unlock(424242)").expect("advisory unlock");
+    }
+
+    #[pg_test]
+    fn test_fdw_dir_namespace_scan() {
+        Spi::run("SELECT pg_advisory_lock(424242)").expect("advisory lock");
+
+        let gen = LanceTestDataGenerator::new().expect("generator");
+        let root = gen.temp_dir.path().join("ns_root");
+        fs::create_dir_all(&root).expect("create ns_root");
+        gen.create_dir_namespace_simple_table(&root, "t_ns")
+            .expect("create namespace table");
+
+        Spi::run("DROP SCHEMA IF EXISTS slt_unit CASCADE").expect("drop schema");
+        Spi::run("CREATE SCHEMA slt_unit").expect("create schema");
+        Spi::run("SET search_path TO slt_unit, public").expect("set search_path");
+        Spi::run("DROP SERVER IF EXISTS lance_ns_unit CASCADE").expect("drop server");
+
+        let create_server = format!(
+            "CREATE SERVER lance_ns_unit FOREIGN DATA WRAPPER lance_fdw OPTIONS (\"ns.impl\" 'dir', \"ns.root\" {});",
+            quote_literal(root.to_str().unwrap())
+        );
+        Spi::run(&create_server).expect("create server");
+
+        let create_table = "CREATE FOREIGN TABLE slt_unit.t_ns(id int4, name text, active bool) \
+            SERVER lance_ns_unit OPTIONS (\"ns.table_id\" '[\"t_ns\"]');";
+        Spi::run(create_table).expect("create foreign table");
+
+        let cnt = Spi::get_one::<i64>("SELECT count(*) FROM slt_unit.t_ns")
+            .expect("count")
+            .expect("count value");
+        assert_eq!(cnt, 3);
+
+        let v = Spi::get_one::<String>("SELECT name FROM slt_unit.t_ns WHERE id = 2")
             .expect("select")
             .expect("value");
         assert_eq!(v, "Bob");

@@ -26,6 +26,8 @@ pg_test = ["tempfile", "sqllogictest"]
 [dependencies]
 pgrx = "=0.14.3"
 lance_rs = { package = "lance", version = "1.0" }
+lance-namespace = "1.0"
+lance-namespace-impls = { version = "1.0", features = ["rest"] }
 arrow = "56.2"
 arrow-schema = "56.2"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }

@@ -1,6 +1,8 @@
 use crate::fdw::convert::{arrow_value_to_datum, validate_arrow_type_for_pg_oid, ConvertErrorKind};
-use crate::fdw::options::LanceFdwOptions;
+use crate::fdw::namespace::connect_namespace;
+use crate::fdw::options::{LanceDatasetSource, LanceFdwOptions};
 use futures::StreamExt;
+use lance_rs::dataset::builder::DatasetBuilder;
 use lance_rs::dataset::scanner::DatasetRecordBatchStream;
 use lance_rs::Dataset;
 use pgrx::pg_sys;
@@ -139,18 +141,49 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
         );
     }));
 
-    let dataset = runtime
-        .block_on(async { Dataset::open(&opts.uri).await })
-        .unwrap_or_else(|e| {
-            ereport!(
-                ERROR,
-                PgSqlErrorCode::ERRCODE_FDW_TABLE_NOT_FOUND,
-                "failed to open lance dataset",
-                format!("uri={} error={}", opts.uri, e),
-            );
-        });
+    let dataset = match &opts.source {
+        LanceDatasetSource::Uri { uri } => runtime
+            .block_on(async { Dataset::open(uri).await })
+            .unwrap_or_else(|e| {
+                ereport!(
+                    ERROR,
+                    PgSqlErrorCode::ERRCODE_FDW_TABLE_NOT_FOUND,
+                    "failed to open lance dataset",
+                    format!("uri={} error={}", uri, e),
+                );
+            }),
+        LanceDatasetSource::Namespace {
+            server_oid,
+            table_id,
+        } => {
+            let namespace = connect_namespace(runtime.as_ref(), *server_oid).unwrap_or_else(|e| {
+                ereport!(
+                    ERROR,
+                    PgSqlErrorCode::ERRCODE_FDW_INVALID_OPTION_NAME,
+                    "invalid namespace server options",
+                    format!("server_oid={} error={}", server_oid, e),
+                );
+            });
 
-    let stream = create_stream(&runtime, &dataset, &opts.uri, opts.batch_size);
+            let dataset_res: lance_rs::Result<Dataset> = runtime.block_on(async {
+                DatasetBuilder::from_namespace(namespace, table_id.clone(), false)
+                    .await?
+                    .load()
+                    .await
+            });
+
+            dataset_res.unwrap_or_else(|e| {
+                ereport!(
+                    ERROR,
+                    PgSqlErrorCode::ERRCODE_FDW_TABLE_NOT_FOUND,
+                    "failed to open lance dataset via namespace",
+                    format!("{} error={}", opts.dataset_label(), e),
+                );
+            })
+        }
+    };
+
+    let stream = create_stream(&runtime, &dataset, &opts.dataset_label(), opts.batch_size);
 
     let tupdesc = (*relation).rd_att;
     if tupdesc.is_null() {
@@ -188,8 +221,8 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
                     PgSqlErrorCode::ERRCODE_FDW_COLUMN_NAME_NOT_FOUND,
                     "column not found in lance dataset schema",
                     format!(
-                        "uri={} column={} dataset_columns={}",
-                        opts.uri,
+                        "{} column={} dataset_columns={}",
+                        opts.dataset_label(),
                         name,
                         dataset_field_names.join(",")
                     ),
@@ -218,8 +251,8 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
                     errcode,
                     message,
                     format!(
-                        "uri={} column={} arrow_type={} pg_type={} error={}",
-                        opts.uri,
+                        "{} column={} arrow_type={} pg_type={} error={}",
+                        opts.dataset_label(),
                         name,
                         arrow_type,
                         pg_type_name(atttypids[att_idx]),
@@ -285,7 +318,7 @@ pub unsafe extern "C-unwind" fn iterate_foreign_scan(
                         ERROR,
                         PgSqlErrorCode::ERRCODE_FDW_ERROR,
                         "failed to read next record batch",
-                        format!("uri={} error={}", state.opts.uri, e),
+                        format!("{} error={}", state.opts.dataset_label(), e),
                     );
                 }
                 Some(Ok(batch)) => {
@@ -361,8 +394,8 @@ pub unsafe extern "C-unwind" fn iterate_foreign_scan(
                         errcode,
                         message,
                         format!(
-                            "uri={} column={} arrow_type={} pg_type={} error={}",
-                            state.opts.uri,
+                            "{} column={} arrow_type={} pg_type={} error={}",
+                            state.opts.dataset_label(),
                             col_name,
                             col.data_type(),
                             pg_type_name(state.atttypids[i]),
@@ -393,7 +426,7 @@ pub unsafe extern "C-unwind" fn rescan_foreign_scan(node: *mut pg_sys::ForeignSc
     let stream = create_stream(
         &state.runtime,
         &state.dataset,
-        &state.opts.uri,
+        &state.opts.dataset_label(),
         state.opts.batch_size,
     );
     state.stream = Box::pin(stream);
@@ -433,16 +466,45 @@ pub unsafe extern "C-unwind" fn explain_foreign_scan(
 
     let opts = LanceFdwOptions::from_foreign_table(relid).ok();
     if let Some(opts) = opts {
-        let uri_label = match CString::new("Lance URI") {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+        match &opts.source {
+            LanceDatasetSource::Uri { uri } => {
+                let uri_label = match CString::new("Lance URI") {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let uri_value = match CString::new(uri.replace('\0', "")) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                pg_sys::ExplainPropertyText(uri_label.as_ptr(), uri_value.as_ptr(), es);
+            }
+            LanceDatasetSource::Namespace {
+                server_oid,
+                table_id,
+            } => {
+                let table_id_label = match CString::new("Lance Table ID") {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let table_id_json = serde_json::to_string(table_id).unwrap_or_else(|_| "[]".into());
+                let table_id_value = match CString::new(table_id_json.replace('\0', "")) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                pg_sys::ExplainPropertyText(table_id_label.as_ptr(), table_id_value.as_ptr(), es);
 
-        let uri_value = match CString::new(opts.uri.replace('\0', "")) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        pg_sys::ExplainPropertyText(uri_label.as_ptr(), uri_value.as_ptr(), es);
+                let server_label = match CString::new("Lance Namespace Server OID") {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                pg_sys::ExplainPropertyInteger(
+                    server_label.as_ptr(),
+                    std::ptr::null(),
+                    i64::from(u32::from(*server_oid)),
+                    es,
+                );
+            }
+        }
 
         let batch_label = match CString::new("Batch Size") {
             Ok(v) => v,
@@ -506,7 +568,7 @@ fn format_projection_list(relation: *mut pg_sys::RelationData) -> String {
 fn create_stream(
     runtime: &Arc<Runtime>,
     dataset: &Dataset,
-    uri: &str,
+    dataset_label: &str,
     batch_size: usize,
 ) -> DatasetRecordBatchStream {
     let mut scanner = dataset.scan();
@@ -518,7 +580,7 @@ fn create_stream(
                 ERROR,
                 PgSqlErrorCode::ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION,
                 "failed to create scanner stream",
-                format!("uri={} error={}", uri, e),
+                format!("{} error={}", dataset_label, e),
             );
         })
 }
