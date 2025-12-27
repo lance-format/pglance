@@ -1,7 +1,7 @@
 # Basic smoke test for lance FDW.
 
 statement ok
-SELECT lance_import('${SERVER}', '${SCHEMA}', 't_fdw', '${LANCE_URI}', NULL);
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_fdw', '${LANCE_URI}', batch_size => NULL);
 
 query I
 SELECT count(*) FROM t_fdw;

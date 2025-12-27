@@ -19,7 +19,14 @@ CREATE FOREIGN TABLE ${SCHEMA}.ghost(id int4)
 
 query TTT
 SELECT local_table, action, status
-  FROM lance_sync_namespace('${SERVER}', ARRAY[]::text[], '${SCHEMA}', false, false, false)
+  FROM lance_sync_namespace(
+    '${SERVER}',
+    root_namespace_id => ARRAY[]::text[],
+    schema_prefix => '${SCHEMA}',
+    drop_missing => false,
+    recreate_changed => false,
+    dry_run => false
+  )
  ORDER BY local_table, action, status;
 ----
 ghost drift ok
@@ -28,7 +35,14 @@ train create_table ok
 
 query TTT
 SELECT local_table, action, status
-  FROM lance_sync_namespace('${SERVER}', ARRAY[]::text[], '${SCHEMA}', true, true, false)
+  FROM lance_sync_namespace(
+    '${SERVER}',
+    root_namespace_id => ARRAY[]::text[],
+    schema_prefix => '${SCHEMA}',
+    drop_missing => true,
+    recreate_changed => true,
+    dry_run => false
+  )
  ORDER BY local_table, action, status;
 ----
 ghost drop_table ok
@@ -49,4 +63,3 @@ query T
 SELECT to_regclass('${SCHEMA}.ghost') IS NULL;
 ----
 t
-
