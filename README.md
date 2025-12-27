@@ -7,7 +7,7 @@
 ## Features
 
 - Foreign Data Wrapper: `lance_fdw`
-- Auto schema discovery + DDL: `lance_import(server, schema, table, uri, batch_size)`
+- Auto schema discovery + DDL: `lance_import(server, schema, table, uri, batch_size => NULL)`
 - Native-first type mapping:
   - Scalars map to native PostgreSQL scalar types where possible
   - `list<T>` maps to `T[]` when possible
@@ -59,7 +59,7 @@ SELECT lance_import(
   'public',
   'my_lance_table',
   '/path/to/your/lance/table',
-  NULL
+  batch_size => NULL
 );
 ```
 
@@ -68,16 +68,41 @@ SELECT lance_import(
 - The foreign table `public.my_lance_table`
 - Composite types for nested `struct` fields, e.g. `public.lance_my_lance_table_meta`
 
-Why not `IMPORT FOREIGN SCHEMA`?
-
-- PostgreSQL's `IMPORT FOREIGN SCHEMA` callback can only emit `CREATE FOREIGN TABLE` statements, so it cannot also create composite types for nested `struct` columns. `lance_import` performs both type and table DDL in one step.
-
 ### 3) Query like a regular table
 
 ```sql
 SELECT count(*) FROM public.my_lance_table;
 
 SELECT * FROM public.my_lance_table LIMIT 10;
+```
+
+### 4) Attach and sync a Lance namespace
+
+```sql
+-- Plan only (no DDL).
+SELECT *
+  FROM lance_attach_namespace('lance_srv', dry_run => true);
+
+-- Attach a namespace subtree into local schemas/tables.
+SELECT *
+  FROM lance_attach_namespace(
+    'lance_srv',
+    root_namespace_id => ARRAY[]::text[],
+    schema_prefix => 'lance',
+    batch_size => NULL,
+    limit_per_list_call => 1000,
+    dry_run => false
+  );
+
+-- Reconcile local objects with the remote namespace.
+SELECT *
+  FROM lance_sync_namespace(
+    'lance_srv',
+    schema_prefix => 'lance',
+    drop_missing => false,
+    recreate_changed => false,
+    dry_run => true
+  );
 ```
 
 ## Type Mapping (native-first)

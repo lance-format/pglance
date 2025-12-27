@@ -10,7 +10,14 @@ CREATE SERVER ${SERVER} FOREIGN DATA WRAPPER lance_fdw
 statement ok
 CREATE TEMP TABLE attach_result AS
   SELECT local_schema, local_table, status, detail
-    FROM lance_attach_namespace('${SERVER}', ARRAY[]::text[], '${SCHEMA}', NULL, 1000, false);
+    FROM lance_attach_namespace(
+      '${SERVER}',
+      root_namespace_id => ARRAY[]::text[],
+      schema_prefix => '${SCHEMA}',
+      batch_size => NULL,
+      limit_per_list_call => 1000,
+      dry_run => false
+    );
 
 query I
 SELECT count(*) FROM attach_result;

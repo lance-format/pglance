@@ -1,7 +1,13 @@
 # Ensure declared type mapping matches runtime value conversion.
 
 statement ok
-SELECT lance_import('${SERVER}', '${SCHEMA}', 't_misc', '${LANCE_URI_MISC}', NULL);
+SELECT lance_import(
+  '${SERVER}',
+  '${SCHEMA}',
+  't_misc',
+  '${LANCE_URI_MISC}',
+  batch_size => NULL
+);
 
 query T
 SELECT atttypid::regtype::text
@@ -34,4 +40,3 @@ query T
 SELECT (dec IS NULL) AND (dict IS NULL) FROM t_misc WHERE u16 = 2;
 ----
 t
-
