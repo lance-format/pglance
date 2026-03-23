@@ -1,0 +1,304 @@
+# Test that when a write operation fails, previously written Lance data
+# is consistent, and that PG-side transaction semantics behave correctly
+# around Lance write operations.
+#
+# Key scenarios tested:
+#   1. Source query error — Lance dataset must remain unchanged.
+#   2. Delete with invalid predicate — dataset must remain unchanged.
+#   3. Merge with bad on_column — dataset must remain unchanged.
+#   4. Sequential writes where an intermediate step fails — verify
+#      the dataset state matches the last successful operation.
+#   5. Exception in PL/pgSQL after a successful lance_append — the PG
+#      transaction rolls back but Lance data persists (two-system limitation).
+
+# ── Helper ──
+
+statement ok
+CREATE OR REPLACE FUNCTION capture_error(sql text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text;
+BEGIN
+  EXECUTE sql;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL;
+  RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det);
+END $$;
+
+# ── Scenario 1: Source query error leaves dataset unchanged ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_txn_src_err.lance',
+    'SELECT v::int4 AS id, ''row_'' || v::text AS label FROM generate_series(1,5) v',
+    mode := 'create'
+  );
+----
+5 t
+
+# Attempt an append with a source query that references a non-existent table
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/t_txn_src_err.lance' || ''', ''SELECT * FROM this_table_does_not_exist'', mode := ''append'')'
+) IS NOT NULL;
+----
+t
+
+# Dataset must still have exactly 5 rows
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_txn_src_err', '${LANCE_WRITE_DIR}/t_txn_src_err.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_txn_src_err;
+----
+5
+
+# ── Scenario 2: Delete with invalid predicate leaves dataset unchanged ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_delete(''' || '${LANCE_WRITE_DIR}/t_txn_src_err.lance' || ''', ''this is not valid predicate syntax !!!'')'
+) IS NOT NULL;
+----
+t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_txn_src_err CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_txn_src_err', '${LANCE_WRITE_DIR}/t_txn_src_err.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_txn_src_err;
+----
+5
+
+# ── Scenario 3: Merge with non-existent on_column errors, dataset unchanged ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_merge_insert(''' || '${LANCE_WRITE_DIR}/t_txn_src_err.lance' || ''', ''SELECT 1::int4 AS id, ''''x''''::text AS label'', ARRAY[''no_such_column''])'
+) IS NOT NULL;
+----
+t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_txn_src_err CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_txn_src_err', '${LANCE_WRITE_DIR}/t_txn_src_err.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_txn_src_err;
+----
+5
+
+# ── Scenario 4: Multi-step where intermediate fails ──
+# Create → Append(success) → Append(fail) → verify state matches after step 2.
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_txn_multi.lance',
+    'SELECT v::int4 AS id FROM generate_series(1,3) v',
+    mode := 'create'
+  );
+----
+3 t
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_txn_multi.lance',
+    'SELECT v::int4 AS id FROM generate_series(4,6) v',
+    mode := 'append'
+  );
+----
+3 t
+
+# This append should fail — bad source query
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/t_txn_multi.lance' || ''', ''SELECT invalid_syntax FROM'', mode := ''append'')'
+) IS NOT NULL;
+----
+t
+
+# Dataset should have 6 rows (3 from create + 3 from first append)
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_txn_multi', '${LANCE_WRITE_DIR}/t_txn_multi.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_txn_multi;
+----
+6
+
+query I
+SELECT min(id) FROM t_txn_multi;
+----
+1
+
+query I
+SELECT max(id) FROM t_txn_multi;
+----
+6
+
+# ── Scenario 5: PG transaction rollback after successful Lance write ──
+# This demonstrates the two-system limitation: Lance data persists
+# even when the PG transaction is rolled back.
+
+# Create a fresh dataset
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_txn_rollback.lance',
+    'SELECT v::int4 AS id, ''before_'' || v::text AS label FROM generate_series(1,3) v',
+    mode := 'create'
+  );
+----
+3 t
+
+# Use PL/pgSQL to: (a) do a lance_append, (b) raise exception to force rollback
+# The lance_append executes inside the function via SPI, writes to Lance,
+# then the RAISE causes the PG transaction subtransaction to roll back.
+
+statement ok
+CREATE OR REPLACE FUNCTION write_then_fail(uri text) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM lance_append(
+    uri,
+    'SELECT v::int4 AS id, ''added_'' || v::text AS label FROM generate_series(4,6) v',
+    mode := 'append'
+  );
+  -- Force an error AFTER the Lance write has succeeded
+  RAISE EXCEPTION 'deliberate rollback after lance write';
+END $$;
+
+# The function call should error
+query T
+SELECT capture_error(
+  'SELECT write_then_fail(''' || '${LANCE_WRITE_DIR}/t_txn_rollback.lance' || ''')'
+) IS NOT NULL;
+----
+t
+
+# The Lance dataset may have the appended data (since Lance committed independently).
+# Verify the dataset is still readable. It may have 3 or 6 rows depending on whether
+# the Lance write committed before the PG exception.
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_txn_rollback', '${LANCE_WRITE_DIR}/t_txn_rollback.lance', batch_size => NULL);
+
+# The original 3 rows must exist regardless
+query I
+SELECT count(*) FROM t_txn_rollback WHERE id <= 3;
+----
+3
+
+# ── Scenario 6: Delete then append in same function, error after delete ──
+# Verify the delete has taken effect in Lance even if PG rolls back.
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_txn_del_roll.lance',
+    'SELECT v::int4 AS id, ''item_'' || v::text AS label FROM generate_series(1,5) v',
+    mode := 'create'
+  );
+----
+5 t
+
+statement ok
+CREATE OR REPLACE FUNCTION delete_then_fail(uri text) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM lance_delete(uri, 'id <= 2');
+  RAISE EXCEPTION 'deliberate error after delete';
+END $$;
+
+query T
+SELECT capture_error(
+  'SELECT delete_then_fail(''' || '${LANCE_WRITE_DIR}/t_txn_del_roll.lance' || ''')'
+) IS NOT NULL;
+----
+t
+
+# Lance delete committed independently — dataset should reflect the deletion.
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_txn_del_roll', '${LANCE_WRITE_DIR}/t_txn_del_roll.lance', batch_size => NULL);
+
+# Rows 1,2 deleted by lance_delete. Even though PG rolled back, Lance committed.
+query I
+SELECT count(*) FROM t_txn_del_roll WHERE id <= 2;
+----
+0
+
+query I
+SELECT count(*) FROM t_txn_del_roll WHERE id > 2;
+----
+3
+
+# ── Scenario 7: Merge insert then error — verify merge committed in Lance ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_txn_merge_roll.lance',
+    'SELECT v::int4 AS id, ''orig_'' || v::text AS name FROM generate_series(1,3) v',
+    mode := 'create'
+  );
+----
+3 t
+
+statement ok
+CREATE OR REPLACE FUNCTION merge_then_fail(uri text) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+  PERFORM lance_merge_insert(
+    uri,
+    'SELECT v::int4 AS id, ''merged_'' || v::text AS name FROM generate_series(2,5) v',
+    ARRAY['id'],
+    when_matched := 'update',
+    when_not_matched := 'insert'
+  );
+  RAISE EXCEPTION 'deliberate error after merge_insert';
+END $$;
+
+query T
+SELECT capture_error(
+  'SELECT merge_then_fail(''' || '${LANCE_WRITE_DIR}/t_txn_merge_roll.lance' || ''')'
+) IS NOT NULL;
+----
+t
+
+# Lance merge committed independently
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_txn_merge_roll', '${LANCE_WRITE_DIR}/t_txn_merge_roll.lance', batch_size => NULL);
+
+# Should have 5 rows: 1 (untouched), 2-3 (updated), 4-5 (inserted)
+query I
+SELECT count(*) FROM t_txn_merge_roll;
+----
+5
+
+query T
+SELECT name FROM t_txn_merge_roll WHERE id = 1;
+----
+orig_1
+
+query T
+SELECT name FROM t_txn_merge_roll WHERE id = 3;
+----
+merged_3
+
+query T
+SELECT name FROM t_txn_merge_roll WHERE id = 5;
+----
+merged_5

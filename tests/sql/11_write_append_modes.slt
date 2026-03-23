@@ -1,0 +1,164 @@
+# Test lance_append with mode='append' and mode='overwrite'.
+
+# ── Setup: create an initial dataset ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_append_test.lance',
+    'SELECT v::int4 AS id, ''orig_'' || v::text AS label FROM generate_series(1,3) v',
+    mode := 'create'
+  );
+----
+3 t
+
+# ── Append 2 more rows ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_append_test.lance',
+    'SELECT v::int4 AS id, ''new_'' || v::text AS label FROM generate_series(4,5) v',
+    mode := 'append'
+  );
+----
+2 t
+
+# Read back — should see all 5 rows
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_append_test', '${LANCE_WRITE_DIR}/t_append_test.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_append_test;
+----
+5
+
+query IT
+SELECT id, label FROM t_append_test ORDER BY id;
+----
+1 orig_1
+2 orig_2
+3 orig_3
+4 new_4
+5 new_5
+
+# ── Append to non-existent dataset should fail ──
+
+statement ok
+CREATE OR REPLACE FUNCTION capture_error(sql text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text;
+BEGIN
+  EXECUTE sql;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL;
+  RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det);
+END $$;
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/does_not_exist_append.lance' || ''', ''SELECT 1::int4 AS id'', mode := ''append'')'
+) IS NOT NULL;
+----
+t
+
+# ── Overwrite — replace all data ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_append_test.lance',
+    'SELECT v::int4 AS id, ''replaced_'' || v::text AS label FROM generate_series(10,12) v',
+    mode := 'overwrite'
+  );
+----
+3 t
+
+# Re-import to pick up the overwritten data.
+# Need to drop and re-import since the schema might be cached.
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_append_test CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_append_test', '${LANCE_WRITE_DIR}/t_append_test.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_append_test;
+----
+3
+
+query IT
+SELECT id, label FROM t_append_test ORDER BY id;
+----
+10 replaced_10
+11 replaced_11
+12 replaced_12
+
+# ── Append zero rows — succeeds with 0 ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_append_test.lance',
+    'SELECT 1::int4 AS id, ''x''::text AS label WHERE false',
+    mode := 'append'
+  );
+----
+0 t
+
+# Count should still be 3 after appending zero rows
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_append_test CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_append_test', '${LANCE_WRITE_DIR}/t_append_test.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_append_test;
+----
+3
+
+# ── Invalid mode should fail ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/t_append_test.lance' || ''', ''SELECT 1::int4 AS id, ''''x''''::text AS label'', mode := ''badmode'')'
+) IS NOT NULL;
+----
+t
+
+# ── Large batch: append with custom batch_size ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_batch_size.lance',
+    'SELECT v::int4 AS id, (''val_'' || v::text) AS name FROM generate_series(1,100) v',
+    mode := 'create',
+    batch_size := 10
+  );
+----
+100 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_batch_size', '${LANCE_WRITE_DIR}/t_batch_size.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_batch_size;
+----
+100
+
+query I
+SELECT min(id) FROM t_batch_size;
+----
+1
+
+query I
+SELECT max(id) FROM t_batch_size;
+----
+100

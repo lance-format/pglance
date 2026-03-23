@@ -62,6 +62,22 @@ pub unsafe extern "C-unwind" fn get_foreign_paths(
     let startup_cost: f64 = 0.0;
     let total_cost: f64 = rows.max(1.0);
 
+    // pg17 added an extra `private` List* parameter to create_foreignscan_path
+    #[cfg(any(feature = "pg17"))]
+    let path = pg_sys::create_foreignscan_path(
+        root,
+        baserel,
+        (*baserel).reltarget,
+        rows,
+        startup_cost,
+        total_cost,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+    #[cfg(not(any(feature = "pg17")))]
     let path = pg_sys::create_foreignscan_path(
         root,
         baserel,
@@ -166,7 +182,7 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
             });
 
             let dataset_res: lance_rs::Result<Dataset> = runtime.block_on(async {
-                DatasetBuilder::from_namespace(namespace, table_id.clone(), false)
+                DatasetBuilder::from_namespace(namespace, table_id.clone())
                     .await?
                     .load()
                     .await

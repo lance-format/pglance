@@ -2,6 +2,7 @@ use pgrx::prelude::*;
 use pgrx::JsonB;
 
 mod fdw;
+mod write;
 
 pgrx::pg_module_magic!();
 
@@ -115,6 +116,90 @@ fn lance_sync_namespace(
     .unwrap_or_else(|e| pgrx::error!("lance_sync_namespace failed: {}", e));
 
     TableIterator::new(rows)
+}
+
+#[pg_extern]
+fn lance_append(
+    uri: &str,
+    source_query: &str,
+    mode: default!(&str, "'append'"),
+    batch_size: default!(i32, "1024"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(rows_written, i64),
+        name!(duration_ms, i64),
+    ),
+> {
+    let (rows_written, duration_ms) = write::append::lance_append_impl(
+        uri,
+        source_query,
+        mode,
+        batch_size as usize,
+        server_name,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_append failed: {}", e));
+
+    TableIterator::new(vec![(rows_written, duration_ms)])
+}
+
+#[pg_extern]
+fn lance_merge_insert(
+    uri: &str,
+    source_query: &str,
+    on_columns: Vec<String>,
+    when_matched: default!(&str, "'update'"),
+    when_not_matched: default!(&str, "'insert'"),
+    batch_size: default!(i32, "1024"),
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(rows_merged, i64),
+        name!(rows_inserted, Option<i64>),
+        name!(rows_updated, Option<i64>),
+        name!(duration_ms, i64),
+    ),
+> {
+    let (rows_merged, rows_inserted, rows_updated, duration_ms) =
+        write::merge_insert::lance_merge_insert_impl(
+            uri,
+            source_query,
+            on_columns,
+            when_matched,
+            when_not_matched,
+            batch_size as usize,
+            server_name,
+        )
+        .unwrap_or_else(|e| pgrx::error!("lance_merge_insert failed: {}", e));
+
+    let inserted = if rows_inserted < 0 { None } else { Some(rows_inserted) };
+    let updated = if rows_updated < 0 { None } else { Some(rows_updated) };
+
+    TableIterator::new(vec![(rows_merged, inserted, updated, duration_ms)])
+}
+
+#[pg_extern]
+fn lance_delete(
+    uri: &str,
+    predicate: &str,
+    server_name: default!(Option<&str>, "NULL"),
+) -> TableIterator<
+    'static,
+    (
+        name!(fragments_removed, i64),
+        name!(duration_ms, i64),
+    ),
+> {
+    let (fragments_removed, duration_ms) = write::delete::lance_delete_impl(
+        uri,
+        predicate,
+        server_name,
+    )
+    .unwrap_or_else(|e| pgrx::error!("lance_delete failed: {}", e));
+
+    TableIterator::new(vec![(fragments_removed, duration_ms)])
 }
 
 #[cfg(any(test, feature = "pg_test"))]

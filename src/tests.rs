@@ -404,6 +404,17 @@ mod tests {
             .expect("uri")
             .replace('\'', "''");
 
+        // Create a simple (id, name, active) dataset for write-test read-back verification
+        let simple_path = gen
+            .create_dir_namespace_simple_table(gen.temp_dir.path(), "simple_write_src")
+            .expect("create simple table");
+        let simple_uri = simple_path.to_str().expect("uri").replace('\'', "''");
+
+        // A writable directory that write tests can create datasets in
+        let write_dir = gen.temp_dir.path().join("write_scratch");
+        fs::create_dir_all(&write_dir).expect("create write_scratch");
+        let write_dir_str = write_dir.to_str().expect("uri").replace('\'', "''");
+
         let ns_root = gen.temp_dir.path().join("ns_root");
         fs::create_dir_all(&ns_root).expect("create ns_root");
         gen.create_dir_namespace_simple_table(&ns_root, "t_root")
@@ -463,7 +474,9 @@ mod tests {
             script = script.replace("${LANCE_URI_STRUCT_LIST}", &struct_list_uri);
             script = script.replace("${LANCE_URI_MISC}", &misc_uri);
             script = script.replace("${LANCE_URI_OVERFLOW}", &overflow_uri);
+            script = script.replace("${LANCE_URI_SIMPLE}", &simple_uri);
             script = script.replace("${LANCE_BAD_URI}", &bad_uri);
+            script = script.replace("${LANCE_WRITE_DIR}", &write_dir_str);
             script = script.replace("${LANCE_NS_ROOT}", &ns_root_uri);
             script = script.replace("${SCHEMA}", &schema);
             script = script.replace("${SERVER}", &server);

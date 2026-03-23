@@ -1,0 +1,145 @@
+# Test lance_delete — remove rows by predicate and verify via FDW read-back.
+
+# ── Setup: create a dataset with 10 rows ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_delete_test.lance',
+    'SELECT v::int4 AS id, ''item_'' || v::text AS label, (v % 2 = 0) AS even FROM generate_series(1,10) v',
+    mode := 'create'
+  );
+----
+10 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_delete_test', '${LANCE_WRITE_DIR}/t_delete_test.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_delete_test;
+----
+10
+
+# ── Delete rows where id > 8 ──
+
+query II
+SELECT (fragments_removed >= 0) AS ok, (duration_ms >= 0) AS time_ok
+  FROM lance_delete(
+    '${LANCE_WRITE_DIR}/t_delete_test.lance',
+    'id > 8'
+  );
+----
+t t
+
+# Re-import and verify
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_delete_test CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_delete_test', '${LANCE_WRITE_DIR}/t_delete_test.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_delete_test;
+----
+8
+
+query I
+SELECT max(id) FROM t_delete_test;
+----
+8
+
+# ── Delete with no matching rows — should succeed quietly ──
+
+query II
+SELECT (fragments_removed >= 0) AS ok, (duration_ms >= 0) AS time_ok
+  FROM lance_delete(
+    '${LANCE_WRITE_DIR}/t_delete_test.lance',
+    'id > 9999'
+  );
+----
+t t
+
+# Count unchanged
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_delete_test CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_delete_test', '${LANCE_WRITE_DIR}/t_delete_test.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_delete_test;
+----
+8
+
+# ── Delete with compound predicate ──
+
+query II
+SELECT (fragments_removed >= 0) AS ok, (duration_ms >= 0) AS time_ok
+  FROM lance_delete(
+    '${LANCE_WRITE_DIR}/t_delete_test.lance',
+    'id <= 3'
+  );
+----
+t t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_delete_test CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_delete_test', '${LANCE_WRITE_DIR}/t_delete_test.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_delete_test;
+----
+5
+
+query I
+SELECT min(id) FROM t_delete_test;
+----
+4
+
+# ── Delete from non-existent dataset should error ──
+
+statement ok
+CREATE OR REPLACE FUNCTION capture_error(sql text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text;
+BEGIN
+  EXECUTE sql;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL;
+  RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det);
+END $$;
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_delete(''' || '${LANCE_WRITE_DIR}/no_such_dataset.lance' || ''', ''id = 1'')'
+) IS NOT NULL;
+----
+t
+
+# ── Delete all remaining rows ──
+
+query II
+SELECT (fragments_removed >= 0) AS ok, (duration_ms >= 0) AS time_ok
+  FROM lance_delete(
+    '${LANCE_WRITE_DIR}/t_delete_test.lance',
+    'id >= 0'
+  );
+----
+t t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_delete_test CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_delete_test', '${LANCE_WRITE_DIR}/t_delete_test.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_delete_test;
+----
+0

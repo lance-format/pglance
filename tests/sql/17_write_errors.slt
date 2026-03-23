@@ -1,0 +1,233 @@
+# Write operation error handling and edge cases.
+
+statement ok
+CREATE OR REPLACE FUNCTION capture_error(sql text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text;
+BEGIN
+  EXECUTE sql;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL;
+  RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det);
+END $$;
+
+# ── lance_append: create with duplicate dataset URI fails ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_err_dup.lance',
+    'SELECT 1::int4 AS id',
+    mode := 'create'
+  );
+----
+1 t
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''SELECT 1::int4 AS id'', mode := ''create'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_append: append to non-existent dataset fails ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/nonexistent_dataset.lance' || ''', ''SELECT 1::int4 AS id'', mode := ''append'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_append: invalid SQL in source_query ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''SELECTTTT garbage query'', mode := ''append'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_append: source_query with zero columns ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/t_err_zero_col.lance' || ''', ''SELECT'', mode := ''create'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_delete: non-existent dataset ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_delete(''' || '${LANCE_WRITE_DIR}/totally_missing.lance' || ''', ''id = 1'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_delete: malformed predicate ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_delete(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''THIS IS NOT A VALID PREDICATE @#$%'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_merge_insert: empty on_columns array ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_merge_insert(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''SELECT 1::int4 AS id'', ARRAY[]::text[])'
+) IS NOT NULL;
+----
+t
+
+# ── lance_merge_insert: on_column not in source result ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_merge_insert(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''SELECT 1::int4 AS id'', ARRAY[''nonexistent_col''])'
+) IS NOT NULL;
+----
+t
+
+# ── lance_merge_insert: on_column not in Lance schema ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_merge_insert(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''SELECT 1::int4 AS id, 2::int4 AS extra'', ARRAY[''extra''])'
+) IS NOT NULL;
+----
+t
+
+# ── lance_merge_insert: invalid when_matched value ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_merge_insert(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''SELECT 1::int4 AS id'', ARRAY[''id''], when_matched := ''invalid_value'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_merge_insert: invalid when_not_matched value ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_merge_insert(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''SELECT 1::int4 AS id'', ARRAY[''id''], when_not_matched := ''bad'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_merge_insert: non-existent dataset ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_merge_insert(''' || '${LANCE_WRITE_DIR}/nowhere.lance' || ''', ''SELECT 1::int4 AS id'', ARRAY[''id''])'
+) IS NOT NULL;
+----
+t
+
+# ── lance_append: invalid mode string ──
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/t_err_dup.lance' || ''', ''SELECT 1::int4 AS id'', mode := ''upsert'')'
+) IS NOT NULL;
+----
+t
+
+# ── lance_append: large number of rows (stress test) ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_stress.lance',
+    'SELECT v::int4 AS id, (''name_'' || v::text) AS name FROM generate_series(1,10000) v',
+    mode := 'create',
+    batch_size := 500
+  );
+----
+10000 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_stress', '${LANCE_WRITE_DIR}/t_stress.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_stress;
+----
+10000
+
+query I
+SELECT count(DISTINCT id) FROM t_stress;
+----
+10000
+
+# ── Idempotent merge: merge same data twice, count should stay the same ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_idemp.lance',
+    'SELECT v::int4 AS id, ''val_'' || v::text AS name FROM generate_series(1,5) v',
+    mode := 'create'
+  );
+----
+5 t
+
+# Merge the same 5 rows again — they all match, so no new rows should appear
+query IIII
+SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS upd_null, (duration_ms >= 0) AS time_ok
+  FROM lance_merge_insert(
+    '${LANCE_WRITE_DIR}/t_idemp.lance',
+    'SELECT v::int4 AS id, ''val_'' || v::text AS name FROM generate_series(1,5) v',
+    ARRAY['id'],
+    when_matched := 'update',
+    when_not_matched := 'insert'
+  );
+----
+5 t t t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_idemp', '${LANCE_WRITE_DIR}/t_idemp.lance', batch_size => NULL);
+
+# Still exactly 5 rows
+query I
+SELECT count(*) FROM t_idemp;
+----
+5
+
+# ── Delete all then append — verify dataset is reusable after emptying ──
+
+query II
+SELECT (fragments_removed >= 0) AS ok, (duration_ms >= 0) AS time_ok
+  FROM lance_delete(
+    '${LANCE_WRITE_DIR}/t_idemp.lance',
+    'id >= 0'
+  );
+----
+t t
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_idemp.lance',
+    'SELECT 42::int4 AS id, ''reborn''::text AS name',
+    mode := 'append'
+  );
+----
+1 t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_idemp CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_idemp', '${LANCE_WRITE_DIR}/t_idemp.lance', batch_size => NULL);
+
+query IT
+SELECT id, name FROM t_idemp;
+----
+42 reborn

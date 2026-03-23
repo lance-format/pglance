@@ -1,0 +1,240 @@
+# Verify that all supported PostgreSQL types survive the PG → Arrow → Lance → Arrow → PG
+# round-trip correctly. Each type is written via lance_append and read back via the FDW.
+
+# ── int2, int4, int8 ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_int.lance',
+    'SELECT 1::int2 AS s, 2::int4 AS i, 3::int8 AS b, (-32768)::int2 AS s_min, 2147483647::int4 AS i_max, 9223372036854775807::int8 AS b_max',
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_int', '${LANCE_WRITE_DIR}/t_types_int.lance', batch_size => NULL);
+
+query IIIIII
+SELECT s, i, b, s_min, i_max, b_max FROM t_types_int;
+----
+1 2 3 -32768 2147483647 9223372036854775807
+
+# ── float4, float8 ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_float.lance',
+    'SELECT 1.5::float4 AS f4, 2.718281828::float8 AS f8',
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_float', '${LANCE_WRITE_DIR}/t_types_float.lance', batch_size => NULL);
+
+query RR
+SELECT round(f4::numeric, 1), round(f8::numeric, 6) FROM t_types_float;
+----
+1.5 2.718282
+
+# ── bool ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_bool.lance',
+    'SELECT true AS t_val, false AS f_val',
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_bool', '${LANCE_WRITE_DIR}/t_types_bool.lance', batch_size => NULL);
+
+query TT
+SELECT t_val, f_val FROM t_types_bool;
+----
+t f
+
+# ── text ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_text.lance',
+    $$SELECT 'hello world'::text AS txt, ''::text AS empty_txt, 'café ☕'::text AS unicode$$,
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_text', '${LANCE_WRITE_DIR}/t_types_text.lance', batch_size => NULL);
+
+query T
+SELECT txt FROM t_types_text;
+----
+hello world
+
+query T
+SELECT empty_txt FROM t_types_text;
+----
+(empty)
+
+query T
+SELECT unicode FROM t_types_text;
+----
+café ☕
+
+# ── NULLs ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_null.lance',
+    'SELECT NULL::int4 AS n_int, NULL::text AS n_text, NULL::float8 AS n_float, NULL::bool AS n_bool',
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_null', '${LANCE_WRITE_DIR}/t_types_null.lance', batch_size => NULL);
+
+query TTTT
+SELECT (n_int IS NULL), (n_text IS NULL), (n_float IS NULL), (n_bool IS NULL) FROM t_types_null;
+----
+t t t t
+
+# ── Mixed NULLs and values ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_mixed.lance',
+    $$SELECT * FROM (VALUES
+      (1::int4, 'a'::text, true),
+      (NULL::int4, NULL::text, NULL::bool),
+      (3::int4, 'c'::text, false)
+    ) AS t(id, label, flag)$$,
+    mode := 'create'
+  );
+----
+3 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_mixed', '${LANCE_WRITE_DIR}/t_types_mixed.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_types_mixed;
+----
+3
+
+query I
+SELECT count(*) FROM t_types_mixed WHERE id IS NULL;
+----
+1
+
+query I
+SELECT count(*) FROM t_types_mixed WHERE label IS NOT NULL;
+----
+2
+
+# ── date ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_date.lance',
+    $$SELECT '2025-06-15'::date AS d1, '1970-01-01'::date AS epoch, '2000-12-31'::date AS y2k$$,
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_date', '${LANCE_WRITE_DIR}/t_types_date.lance', batch_size => NULL);
+
+query T
+SELECT d1::text FROM t_types_date;
+----
+2025-06-15
+
+query T
+SELECT epoch::text FROM t_types_date;
+----
+1970-01-01
+
+# ── timestamp ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_types_ts.lance',
+    $$SELECT '2025-06-15 14:30:00'::timestamp AS ts$$,
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_types_ts', '${LANCE_WRITE_DIR}/t_types_ts.lance', batch_size => NULL);
+
+query T
+SELECT ts::text FROM t_types_ts;
+----
+2025-06-15 14:30:00
+
+# ── Data integrity comparison: write N rows, read them back, compare ──
+# This creates a PG temp table, writes it to Lance, reads back via FDW,
+# and confirms every row matches using EXCEPT.
+
+statement ok
+CREATE TEMP TABLE src_compare(id int4, val text, score float8);
+
+statement ok
+INSERT INTO src_compare
+SELECT v, 'item_' || v::text, (v * 1.1)::float8 FROM generate_series(1,50) v;
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_compare.lance',
+    'SELECT id, val, score FROM src_compare ORDER BY id',
+    mode := 'create'
+  );
+----
+50 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_compare', '${LANCE_WRITE_DIR}/t_compare.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_compare;
+----
+50
+
+# Source minus Lance should yield zero rows (all source rows exist in Lance)
+query I
+SELECT count(*) FROM (
+  SELECT id, val FROM src_compare
+  EXCEPT
+  SELECT id, val FROM t_compare
+) diff;
+----
+0
+
+# Lance minus Source should also yield zero rows
+query I
+SELECT count(*) FROM (
+  SELECT id, val FROM t_compare
+  EXCEPT
+  SELECT id, val FROM src_compare
+) diff;
+----
+0

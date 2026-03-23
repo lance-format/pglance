@@ -1,0 +1,91 @@
+# Test lance_append with mode='create' — create a new Lance dataset from a PG query.
+
+# ── Create a dataset from literal VALUES ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_create_basic.lance',
+    'SELECT v::int4 AS id, ''row_'' || v::text AS name FROM generate_series(1,5) v',
+    mode := 'create'
+  );
+----
+5 t
+
+# Read it back via FDW to verify the data landed correctly.
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_create_basic', '${LANCE_WRITE_DIR}/t_create_basic.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_create_basic;
+----
+5
+
+query IT
+SELECT id, name FROM t_create_basic ORDER BY id;
+----
+1 row_1
+2 row_2
+3 row_3
+4 row_4
+5 row_5
+
+# ── Create with zero rows — should succeed with rows_written = 0 ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_create_empty.lance',
+    'SELECT 1::int4 AS id WHERE false',
+    mode := 'create'
+  );
+----
+0 t
+
+# ── Create fails if dataset already exists ──
+
+statement ok
+CREATE OR REPLACE FUNCTION capture_error(sql text)
+RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE st text; msg text; det text;
+BEGIN
+  EXECUTE sql;
+  RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+  GET STACKED DIAGNOSTICS st = RETURNED_SQLSTATE, msg = MESSAGE_TEXT, det = PG_EXCEPTION_DETAIL;
+  RETURN jsonb_build_object('sqlstate', st, 'message', msg, 'detail', det);
+END $$;
+
+query T
+SELECT capture_error(
+  'SELECT * FROM lance_append(''' || '${LANCE_WRITE_DIR}/t_create_basic.lance' || ''', ''SELECT 1::int4 AS id'', mode := ''create'')'
+) IS NOT NULL;
+----
+t
+
+# ── Create with multiple types ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_create_types.lance',
+    'SELECT 1::int2 AS s, 2::int4 AS i, 3::int8 AS b, 1.5::float4 AS f4, 2.5::float8 AS f8, true AS flag, ''hello''::text AS t',
+    mode := 'create'
+  );
+----
+1 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_create_types', '${LANCE_WRITE_DIR}/t_create_types.lance', batch_size => NULL);
+
+query IIIRRT
+SELECT s, i, b, round(f4::numeric, 1), round(f8::numeric, 1), flag FROM t_create_types;
+----
+1 2 3 1.5 2.5 t
+
+query T
+SELECT t FROM t_create_types;
+----
+hello

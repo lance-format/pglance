@@ -1,0 +1,234 @@
+# Full round-trip: create → append → merge → delete → verify at every step.
+# This exercises all write operations in sequence on a single dataset and
+# uses FDW read-back to verify correctness after each mutation.
+
+# ── Step 1: Create the dataset ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_roundtrip.lance',
+    $$SELECT v::int4 AS id,
+            ('product_' || v::text) AS name,
+            (v * 10.0)::float8 AS price,
+            (v % 2 = 0) AS in_stock
+       FROM generate_series(1,5) v$$,
+    mode := 'create'
+  );
+----
+5 t
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_rt', '${LANCE_WRITE_DIR}/t_roundtrip.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_rt;
+----
+5
+
+query ITRT
+SELECT id, name, round(price::numeric, 1), in_stock FROM t_rt ORDER BY id;
+----
+1 product_1 10.0 f
+2 product_2 20.0 t
+3 product_3 30.0 f
+4 product_4 40.0 t
+5 product_5 50.0 f
+
+# ── Step 2: Append 3 more rows ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_roundtrip.lance',
+    $$SELECT v::int4 AS id,
+            ('product_' || v::text) AS name,
+            (v * 10.0)::float8 AS price,
+            true AS in_stock
+       FROM generate_series(6,8) v$$,
+    mode := 'append'
+  );
+----
+3 t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_rt CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_rt', '${LANCE_WRITE_DIR}/t_roundtrip.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_rt;
+----
+8
+
+query I
+SELECT count(*) FROM t_rt WHERE in_stock;
+----
+5
+
+# ── Step 3: Merge-insert — update ids 7,8 and insert ids 9,10 ──
+
+query IIII
+SELECT rows_merged, rows_inserted IS NULL AS ins_null, rows_updated IS NULL AS upd_null, (duration_ms >= 0) AS time_ok
+  FROM lance_merge_insert(
+    '${LANCE_WRITE_DIR}/t_roundtrip.lance',
+    $$SELECT v::int4 AS id,
+            ('updated_' || v::text) AS name,
+            (v * 100.0)::float8 AS price,
+            false AS in_stock
+       FROM generate_series(7,10) v$$,
+    ARRAY['id'],
+    when_matched := 'update',
+    when_not_matched := 'insert'
+  );
+----
+4 t t t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_rt CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_rt', '${LANCE_WRITE_DIR}/t_roundtrip.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_rt;
+----
+10
+
+# Rows 7,8 should have updated names
+query T
+SELECT name FROM t_rt WHERE id = 7;
+----
+updated_7
+
+query T
+SELECT name FROM t_rt WHERE id = 8;
+----
+updated_8
+
+# Rows 9,10 should be new
+query T
+SELECT name FROM t_rt WHERE id = 9;
+----
+updated_9
+
+# Row 1 should be untouched
+query T
+SELECT name FROM t_rt WHERE id = 1;
+----
+product_1
+
+# ── Step 4: Delete rows where id <= 3 ──
+
+query II
+SELECT (fragments_removed >= 0) AS ok, (duration_ms >= 0) AS time_ok
+  FROM lance_delete(
+    '${LANCE_WRITE_DIR}/t_roundtrip.lance',
+    'id <= 3'
+  );
+----
+t t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_rt CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_rt', '${LANCE_WRITE_DIR}/t_roundtrip.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_rt;
+----
+7
+
+query I
+SELECT min(id) FROM t_rt;
+----
+4
+
+query I
+SELECT max(id) FROM t_rt;
+----
+10
+
+# ── Step 5: Overwrite everything ──
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_roundtrip.lance',
+    $$SELECT v::int4 AS id,
+            ('final_' || v::text) AS name,
+            99.99::float8 AS price,
+            true AS in_stock
+       FROM generate_series(100,102) v$$,
+    mode := 'overwrite'
+  );
+----
+3 t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_rt CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_rt', '${LANCE_WRITE_DIR}/t_roundtrip.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_rt;
+----
+3
+
+query IT
+SELECT id, name FROM t_rt ORDER BY id;
+----
+100 final_100
+101 final_101
+102 final_102
+
+# ── Step 6: Delete + append cycle — re-populate after deleting everything ──
+
+query II
+SELECT (fragments_removed >= 0) AS ok, (duration_ms >= 0) AS time_ok
+  FROM lance_delete(
+    '${LANCE_WRITE_DIR}/t_roundtrip.lance',
+    'id >= 0'
+  );
+----
+t t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_rt CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_rt', '${LANCE_WRITE_DIR}/t_roundtrip.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_rt;
+----
+0
+
+query II
+SELECT rows_written, (duration_ms >= 0) AS ok
+  FROM lance_append(
+    '${LANCE_WRITE_DIR}/t_roundtrip.lance',
+    'SELECT 999::int4 AS id, ''comeback''::text AS name, 0.0::float8 AS price, true::bool AS in_stock',
+    mode := 'append'
+  );
+----
+1 t
+
+statement ok
+DROP FOREIGN TABLE IF EXISTS t_rt CASCADE;
+
+statement ok
+SELECT lance_import('${SERVER}', '${SCHEMA}', 't_rt', '${LANCE_WRITE_DIR}/t_roundtrip.lance', batch_size => NULL);
+
+query I
+SELECT count(*) FROM t_rt;
+----
+1
+
+query IT
+SELECT id, name FROM t_rt;
+----
+999 comeback
