@@ -1,4 +1,4 @@
-use crate::fdw::convert::{arrow_value_to_datum, validate_arrow_type_for_pg_oid, ConvertErrorKind};
+use crate::fdw::convert::{arrow_value_to_datum, tupdesc_attr, validate_arrow_type_for_pg_oid, ConvertErrorKind};
 use crate::fdw::namespace::connect_namespace;
 use crate::fdw::options::{LanceDatasetSource, LanceFdwOptions};
 use futures::StreamExt;
@@ -67,8 +67,10 @@ pub unsafe extern "C-unwind" fn get_foreign_paths(
         baserel,
         (*baserel).reltarget,
         rows,
+        0, // disabled_nodes (PG18+)
         startup_cost,
         total_cost,
+        std::ptr::null_mut(),
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         std::ptr::null_mut(),
@@ -166,7 +168,7 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
             });
 
             let dataset_res: lance_rs::Result<Dataset> = runtime.block_on(async {
-                DatasetBuilder::from_namespace(namespace, table_id.clone(), false)
+                DatasetBuilder::from_namespace(namespace, table_id.clone())
                     .await?
                     .load()
                     .await
@@ -193,7 +195,7 @@ pub unsafe extern "C-unwind" fn begin_foreign_scan(
     let mut atttypids = Vec::with_capacity(natts);
     let mut attnames = Vec::with_capacity(natts);
     for i in 0..natts {
-        let attr = *(*tupdesc).attrs.as_ptr().add(i);
+        let attr = &*tupdesc_attr(tupdesc, i);
         atttypids.push(attr.atttypid);
         if attr.attisdropped {
             attnames.push(None);
@@ -347,7 +349,7 @@ pub unsafe extern "C-unwind" fn iterate_foreign_scan(
 
         let natts = (*tupdesc).natts.max(0) as usize;
         for i in 0..natts {
-            let attr = *(*tupdesc).attrs.as_ptr().add(i);
+            let attr = &*tupdesc_attr(tupdesc, i);
             if attr.attisdropped {
                 *(*slot).tts_values.add(i) = pg_sys::Datum::from(0usize);
                 *(*slot).tts_isnull.add(i) = true;
@@ -546,7 +548,7 @@ fn format_projection_list(relation: *mut pg_sys::RelationData) -> String {
         let mut cols = Vec::with_capacity(natts);
 
         for i in 0..natts {
-            let attr = *(*tupdesc).attrs.as_ptr().add(i);
+            let attr = &*tupdesc_attr(tupdesc, i);
             if attr.attisdropped {
                 continue;
             }
