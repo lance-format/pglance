@@ -15,16 +15,17 @@ path = "./src/bin/pgrx_embed.rs"
 
 
 [features]
-default = ["pg16"]
+default = ["pg18"]
 pg13 = ["pgrx/pg13", "pgrx-tests/pg13" ]
 pg14 = ["pgrx/pg14", "pgrx-tests/pg14" ]
 pg15 = ["pgrx/pg15", "pgrx-tests/pg15" ]
 pg16 = ["pgrx/pg16", "pgrx-tests/pg16" ]
 pg17 = ["pgrx/pg17", "pgrx-tests/pg17" ]
+pg18 = ["pgrx/pg18", "pgrx-tests/pg18" ]
 pg_test = ["tempfile", "sqllogictest"]
 
 [dependencies]
-pgrx = "=0.14.3"
+pgrx = "=0.16.1"
 lance_rs = { package = "lance", version = "1.0" }
 lance-namespace = "1.0"
 lance-namespace-impls = { version = "1.0", features = ["rest"] }
@@ -39,7 +40,7 @@ base64 = "0.22"
 sqllogictest = { version = "=0.29.0", optional = true }
 
 [dev-dependencies]
-pgrx-tests = "=0.14.3"
+pgrx-tests = "=0.16.1"
 tempfile = "3.8"
 sqllogictest = "=0.29.0"
 
@@ -55,3 +56,10 @@ panic = "unwind"
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+# Note: building on aarch64-linux-android currently fails because lance-linalg
+# 1.0.x's build.rs only supports aarch64-{macos,linux}. Tracked in:
+#   https://github.com/lance-format/lance/issues/5746
+#   https://github.com/lance-format/lance/issues/2411
+# Until those are fixed upstream, Android users need a local [patch.crates-io]
+# override for lance-linalg. See PR description.
