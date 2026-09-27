@@ -104,6 +104,7 @@ pub(crate) fn list_table_ids(
                 id: Some(ns_id.clone()),
                 page_token: page_token.clone(),
                 limit: Some(limit_per_list_call),
+                ..Default::default()
             };
 
             let response = runtime
@@ -128,6 +129,7 @@ pub(crate) fn list_table_ids(
                 id: Some(ns_id.clone()),
                 page_token: page_token.clone(),
                 limit: Some(limit_per_list_call),
+                ..Default::default()
             };
 
             let response = runtime
@@ -273,7 +275,7 @@ pub(crate) fn attach_one(
     let dataset = ctx
         .runtime
         .block_on(async {
-            DatasetBuilder::from_namespace(ctx.namespace.clone(), table_id.to_vec(), false)
+            DatasetBuilder::from_namespace(ctx.namespace.clone(), table_id.to_vec())
                 .await?
                 .load()
                 .await

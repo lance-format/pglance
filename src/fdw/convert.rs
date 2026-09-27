@@ -13,6 +13,32 @@ use chrono::Datelike;
 use pgrx::datum::{Date, Timestamp, TimestampWithTimeZone};
 use pgrx::pg_sys;
 use pgrx::prelude::IntoDatum;
+
+/// PG18+ removed `TupleDescData.attrs` (FormData_pg_attribute array) and
+/// replaced it with `compact_attrs` (CompactAttribute array, no attname/atttypid).
+/// Use this helper to get a `FormData_pg_attribute *` like the old `attrs[i]`.
+///
+/// PG18's macro:
+///   TupleDescAttr(desc, i) = (Form_pg_attribute) (
+///       (char*)(desc) + offsetof(TupleDescData, compact_attrs)
+///       + (desc)->natts * sizeof(CompactAttribute)
+///   ) + i
+///
+/// Equivalent to the C `TupleDescAttr()` inline function.
+#[inline(always)]
+pub unsafe fn tupdesc_attr(
+    tupdesc: *mut pg_sys::TupleDescData,
+    i: usize,
+) -> *mut pg_sys::FormData_pg_attribute {
+    use std::mem::size_of;
+    let base = tupdesc as *const u8;
+    let offset_of_compact_attrs = std::mem::offset_of!(pg_sys::TupleDescData, compact_attrs);
+    let natts = (*tupdesc).natts as usize;
+    let attrs_start = base
+        .add(offset_of_compact_attrs + natts * size_of::<pg_sys::CompactAttribute>())
+        as *mut pg_sys::FormData_pg_attribute;
+    attrs_start.add(i)
+}
 use pgrx::AnyNumeric;
 use pgrx::JsonB;
 use serde_json::{Map, Number, Value};
@@ -178,7 +204,7 @@ pub fn validate_arrow_type_for_pg_oid(
             let tupdesc = (*tupdesc).tupDesc;
             let natts = (*tupdesc).natts as usize;
             for i in 0..natts {
-                let attr = *(*tupdesc).attrs.as_ptr().add(i);
+                let attr = &*tupdesc_attr(tupdesc, i);
                 if attr.attisdropped {
                     continue;
                 }
@@ -845,7 +871,7 @@ fn struct_to_composite_datum(
         let mut nulls = vec![true; natts];
 
         for i in 0..natts {
-            let attr = *(*tupdesc).attrs.as_ptr().add(i);
+            let attr = &*tupdesc_attr(tupdesc, i);
             if attr.attisdropped {
                 values[i] = pg_sys::Datum::from(0usize);
                 nulls[i] = true;

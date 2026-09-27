@@ -458,7 +458,7 @@ fn expected_columns(
 ) -> Result<Vec<(String, String)>, String> {
     let dataset = runtime
         .block_on(async {
-            DatasetBuilder::from_namespace(namespace, table_id.to_vec(), false)
+            DatasetBuilder::from_namespace(namespace, table_id.to_vec())
                 .await?
                 .load()
                 .await
